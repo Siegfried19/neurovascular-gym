@@ -1,7 +1,9 @@
-# conda 环境 guidewire_rl：Python 3.12 + SOFA 25.12 的 SofaPython3 + 本仓库。
+# conda env guidewire_rl: Python 3.12 + SofaPython3 from SOFA 25.12 + this repository.
 #   conda env create -f environment.yml
-# 之后还要：装 stEVE（editable）、装本仓库（editable）、写 SOFA 的环境变量、编 BeamAdapter——步骤见 README.md。
-# 版本是 2026-11-10 实际在用的；torch 是 CUDA 12.8 的轮子，没有 NVIDIA 卡就把 extra-index-url 那行去掉装 CPU 版。
+# Still to do afterwards: install stEVE (editable), install this repository (editable), set SOFA's environment
+# variables, build BeamAdapter -- the steps are in README.md.
+# Versions are the ones in use on 2026-11-10; torch is the CUDA 12.8 wheel. Without an NVIDIA GPU, drop the
+# extra-index-url line to get the CPU build.
 name: guidewire_rl
 channels:
   - conda-forge
