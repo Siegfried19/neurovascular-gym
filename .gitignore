@@ -1,0 +1,20 @@
+# Pulled from elsewhere (read-only references), and our stEVE clone, which has its own repo
+/reference/
+/stEVE/
+
+# Training and evaluation outputs
+/runs/
+/outputs/
+
+# BeamAdapter upstream checkout and CMake build (simulator_modifications/beamadapter/build.sh)
+/simulator_modifications/beamadapter/build/
+
+# Python and tool caches
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Machine-local editor and agent settings
+/.vscode/
+/.claude/

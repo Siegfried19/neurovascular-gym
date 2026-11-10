@@ -1,0 +1,13 @@
+diff --git a/src/BeamAdapter/component/model/RodStraightSection.inl b/src/BeamAdapter/component/model/RodStraightSection.inl
+index 7d939fd0..94860758 100644
+--- a/src/BeamAdapter/component/model/RodStraightSection.inl
++++ b/src/BeamAdapter/component/model/RodStraightSection.inl
+@@ -53,7 +53,7 @@ bool RodStraightSection<DataTypes>::initSection()
+ template <class DataTypes>
+ void RodStraightSection<DataTypes>::getRestTransformOnX(Transform& global_H_local, const Real x_used, const Real x_start)
+ {
+-    global_H_local.set(type::Vec3(x_start + x_used, 0.0, 0.0), Quat());
++    global_H_local.set(type::Vec3(x_used, 0.0, 0.0), Quat());
+ }
+ 
+ 

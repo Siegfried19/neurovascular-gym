@@ -1,0 +1,301 @@
+{
+ "what": "the phantom model's inner wall surface, capped at its open ends, as a collision mesh",
+ "model": "biro-phantom_vessel-wall_v2.stl (sha256 d75daffc4e94e94c3ecb8a71031cbdbf3becfd8b29af2e38eecdd3a60f0067f3; Weibo Gao 2026-10-08; copy: contact-aware-tdmpc2-training/VasselTree/Neurovascular model.stl)",
+ "voxel_lumen": "18-biro-phantom/derived/lumen.npz (sha256 7ff66ef63a3adfc7c0931e3c3ea76265b8a236503e49f3aa58317c23585a4b36), used only to tell inner faces from outer ones",
+ "transform": "phantom_arch.json (sha256 70595a2e046f914ba397624751d24b54a8231673dc3f8b5d0cab346429dcea8a): origin_in_phantom_mm, rotation_z_deg",
+ "script": "guidewire_rl/env/vessels/biro_phantom_lumen.py",
+ "model_faces": 1285474,
+ "inner_faces": 624966,
+ "fragments_dropped": 82,
+ "open_ends_capped": [
+  {
+   "centre": [
+    58.94,
+    -122.54,
+    286.25
+   ],
+   "mean_radius_mm": 0.97
+  },
+  {
+   "centre": [
+    20.0,
+    -167.38,
+    290.25
+   ],
+   "mean_radius_mm": 1.41
+  },
+  {
+   "centre": [
+    87.0,
+    -126.6,
+    289.09
+   ],
+   "mean_radius_mm": 0.9
+  },
+  {
+   "centre": [
+    24.5,
+    -183.74,
+    286.69
+   ],
+   "mean_radius_mm": 0.77
+  },
+  {
+   "centre": [
+    94.16,
+    -148.4,
+    272.16
+   ],
+   "mean_radius_mm": 1.07
+  },
+  {
+   "centre": [
+    85.03,
+    -122.98,
+    287.96
+   ],
+   "mean_radius_mm": 1.03
+  },
+  {
+   "centre": [
+    31.5,
+    -140.03,
+    286.85
+   ],
+   "mean_radius_mm": 1.05
+  },
+  {
+   "centre": [
+    97.22,
+    -143.27,
+    284.73
+   ],
+   "mean_radius_mm": 0.73
+  },
+  {
+   "centre": [
+    38.78,
+    -169.67,
+    273.57
+   ],
+   "mean_radius_mm": 1.61
+  },
+  {
+   "centre": [
+    61.58,
+    -168.9,
+    280.24
+   ],
+   "mean_radius_mm": 1.06
+  },
+  {
+   "centre": [
+    86.22,
+    -145.51,
+    264.92
+   ],
+   "mean_radius_mm": 1.39
+  },
+  {
+   "centre": [
+    64.08,
+    -167.23,
+    281.29
+   ],
+   "mean_radius_mm": 0.88
+  },
+  {
+   "centre": [
+    23.7,
+    -178.3,
+    274.31
+   ],
+   "mean_radius_mm": 0.54
+  },
+  {
+   "centre": [
+    -1.11,
+    -129.35,
+    241.43
+   ],
+   "mean_radius_mm": 1.2
+  },
+  {
+   "centre": [
+    62.94,
+    -99.74,
+    226.68
+   ],
+   "mean_radius_mm": 1.71
+  },
+  {
+   "centre": [
+    -20.6,
+    -32.76,
+    -57.74
+   ],
+   "mean_radius_mm": 11.6
+  },
+  {
+   "centre": [
+    -6.56,
+    -70.42,
+    -32.02
+   ],
+   "mean_radius_mm": 1.09
+  },
+  {
+   "centre": [
+    65.29,
+    -43.06,
+    -23.42
+   ],
+   "mean_radius_mm": 1.13
+  },
+  {
+   "centre": [
+    28.91,
+    -73.81,
+    -49.37
+   ],
+   "mean_radius_mm": 1.06
+  },
+  {
+   "centre": [
+    46.67,
+    -28.27,
+    138.84
+   ],
+   "mean_radius_mm": 2.62
+  },
+  {
+   "centre": [
+    57.5,
+    -54.65,
+    7.19
+   ],
+   "mean_radius_mm": 0.97
+  },
+  {
+   "centre": [
+    54.56,
+    -40.15,
+    3.92
+   ],
+   "mean_radius_mm": 1.07
+  },
+  {
+   "centre": [
+    57.33,
+    -71.14,
+    1.72
+   ],
+   "mean_radius_mm": 1.07
+  },
+  {
+   "centre": [
+    6.36,
+    -24.16,
+    -1.27
+   ],
+   "mean_radius_mm": 0.98
+  },
+  {
+   "centre": [
+    -262.8,
+    -51.44,
+    -249.45
+   ],
+   "mean_radius_mm": 1.96
+  },
+  {
+   "centre": [
+    65.87,
+    -37.45,
+    -4.44
+   ],
+   "mean_radius_mm": 1.65
+  },
+  {
+   "centre": [
+    30.98,
+    -23.48,
+    -13.15
+   ],
+   "mean_radius_mm": 1.03
+  },
+  {
+   "centre": [
+    -8.62,
+    -71.54,
+    -21.52
+   ],
+   "mean_radius_mm": 1.08
+  },
+  {
+   "centre": [
+    -2.43,
+    -115.79,
+    -29.48
+   ],
+   "mean_radius_mm": 0.94
+  },
+  {
+   "centre": [
+    -12.24,
+    -87.19,
+    -44.12
+   ],
+   "mean_radius_mm": 1.61
+  },
+  {
+   "centre": [
+    62.62,
+    -55.34,
+    -55.44
+   ],
+   "mean_radius_mm": 1.25
+  },
+  {
+   "centre": [
+    69.12,
+    -64.56,
+    -55.85
+   ],
+   "mean_radius_mm": 1.22
+  },
+  {
+   "centre": [
+    53.43,
+    -71.59,
+    -61.71
+   ],
+   "mean_radius_mm": 1.23
+  },
+  {
+   "centre": [
+    -287.89,
+    -69.08,
+    -247.27
+   ],
+   "mean_radius_mm": 2.58
+  }
+ ],
+ "faces": 120000,
+ "volume_ml": 255.9,
+ "model_inner_face_to_mesh_mm": {
+  "median": 0.073,
+  "p99": 0.188,
+  "max": 0.315
+ },
+ "settings": {
+  "faces": 120000,
+  "probe_mm": [
+   0.4,
+   0.7,
+   1.0,
+   1.4
+  ]
+ },
+ "sha256": "993a760af08dc0ffead6421389c4e53491952f6403dac5ea520842855858bf61"
+}

@@ -1,0 +1,35 @@
+diff --git a/src/BeamAdapter/component/controller/InterventionalRadiologyController.h b/src/BeamAdapter/component/controller/InterventionalRadiologyController.h
+index 5ea336df..6685a498 100644
+--- a/src/BeamAdapter/component/controller/InterventionalRadiologyController.h
++++ b/src/BeamAdapter/component/controller/InterventionalRadiologyController.h
+@@ -168,6 +168,7 @@ public:
+     Data<Real>           d_speed;
+     Data<Coord>          d_startingPos;
+     Data<Real>           d_threshold;
++    Data<Real>           d_minBeamLength;
+     Data<type::vector<Real>>   d_rigidCurvAbs; // Pairs (start - end)
+     Data<std::string>    d_motionFilename;
+     Data<unsigned int>   d_indexFirstNode; // First Node simulated
+diff --git a/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl b/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl
+index ca1460d6..5d52cf71 100644
+--- a/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl
++++ b/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl
+@@ -67,6 +67,7 @@ InterventionalRadiologyController<DataTypes>::InterventionalRadiologyController(
+ , d_speed(initData(&d_speed,(Real)0.0,"speed","continuous beam length increase/decrease"))
+ , d_startingPos(initData(&d_startingPos,Coord(),"startingPos","starting pos for inserting the instrument"))
+ , d_threshold(initData(&d_threshold, (Real)0.01, "threshold", "threshold for controller precision which is homogeneous to the unit of length used in the simulation"))
++, d_minBeamLength(initData(&d_minBeamLength, (Real)0.0, "minBeamLength", "shortest beam: when the nodes are sampled, a node closer than this to the previous one is dropped (as threshold does; 0 or less than threshold: threshold is used)"))
+ , d_rigidCurvAbs(initData(&d_rigidCurvAbs, "rigidCurvAbs", "pairs of curv abs for beams we want to rigidify"))
+ , d_motionFilename(initData(&d_motionFilename, "motionFilename", "text file that includes tracked motion from optical sensor"))
+ , d_indexFirstNode(initData(&d_indexFirstNode, (unsigned int) 0, "indexFirstNode", "first node (should be fixed with restshape)"))
+@@ -1082,8 +1083,8 @@ void InterventionalRadiologyController<DataTypes>::sortCurvAbs(type::vector<Real
+     // here we sort CurvAbs   
+     std::sort(curvAbs.begin(), curvAbs.end());
+ 
+-    // a threshold is used to remove the values that are "too" close...
+-    const auto threshold = d_threshold.getValue();
++    // a threshold is used to remove the values that are "too" close (minBeamLength: a larger distance for this only)
++    const Real threshold = std::max(d_threshold.getValue(), d_minBeamLength.getValue());
+     auto it = std::unique(curvAbs.begin(), curvAbs.end(), [threshold](const Real v1, const Real v2) {
+         return fabs(v1 - v2) < threshold;
+     });

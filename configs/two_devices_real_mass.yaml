@@ -1,0 +1,92 @@
+# two_devices_round1.yaml with the devices at their real masses (user decision 2026-11-03; why each
+# number: docs/simulator_changes.md, problems 8, 20 and 22):
+#   - densities: the guidewire's two sections 2.1e-5 -> 6.45e-9 t/mm^3 (nitinol, as in
+#     phantom_real_mass.yaml); the catheter 5e-6 -> 1.2e-9 t/mm^3, an ESTIMATE (plastic at about
+#     1.2 g/cm^3; the lab's hooked catheter has no measured mass). The first round ran at stEVE's
+#     defaults, ~3300x and ~4000x too heavy, because these masses went NaN (problem 22);
+#   - physics step 6 -> 2 ms (2026-10-28: the real-mass guidewire goes through the wall at 6 ms, problem 20)
+#     -> 4 ms (2026-11-09, docs/simulation_speed.md): 4 ms x alarm 1.0 validated on 260 random-push and
+#     60 scripted episodes (108k steps) with no wall breach, NaN or force blow-up, the same forces and
+#     success as 2 ms, ~1.6x faster; 6 ms was no faster than 4 ms (the contact solve's iterations
+#     double per substep) and alarm 0.5 tunnelled once per 60 episodes at 4 and 6 ms;
+#     collision alarm distance 0.5 -> 1.0 mm: 2 mm from 2026-10-28 to 2026-11-07, then 1.0
+#     (problem 25: the alarm adds to both contact radii, so at 2 mm the wire's points inside the
+#     catheter, held >= 1 mm off the wall by the catheter's radius, were registered against the wall
+#     too, a third to all of the wire's rows, none ever carrying force; 1.0 mm drops them, the step
+#     is ~1.5x faster, 20 scripted + 20 random episodes gave the same forces, success and no wall
+#     breach; 1.0 rather than 0.5 keeps the look-ahead (1.0 + 0.445 mm) above all but 3 of 17k
+#     steps' largest substep moves, 0.5 (0.945 mm) above all but 6; 0.5 is validated too, ~1.8x);
+#   - each device touches the wall with its own radius (problem 8): its own collision model,
+#     contact distance = outer radius (wire 0.445 mm, catheter 1.0 mm), global contact distance 0.
+#   - the lab's hooked catheter kept for its shape (the task and the script are built round it; the
+#     5F Simmons 2 has to be formed in the arch first, which the simulation rarely managed), its
+#     stiffness set to a real catheter's: E 4000 -> 660 MPa, i.e. 486 N mm^2 bending stiffness, the
+#     measured 5F Simmons 2 (Qiu 2024; the lab's 4 GPa is ~6x that and pressed the hook into the wall
+#     with 20-85 N; user decision 2026-11-03);
+#   - densest_sampling: where the two overlap, nodes at the denser device's spacing, so the hook keeps
+#     its 1 mm nodes when it sits on the wire's 10 mm shaft (otherwise 3-4 nodes, and the force at its
+#     corner could run away to thousands of N; needs our BeamAdapter build);
+#   - shortest beam 0.05 mm (problem 22, needs our BeamAdapter build with minBeamLength): a beam
+#     of 0.010-0.013 mm between the trailing device's tip (or a section end) and a node of the
+#     other, on a substep with a wall contact, made the contact solve return NaN; with a 0.015 mm
+#     shortest beam a 0.018 mm one still did once, with 0.02 none did in 1500 random steps, and
+#     0.05 leaves margin (a device ends at most 0.05 mm short of its commanded tip);
+#   - stop_on_nan: a substep with non-finite nodes ends the control step as stEVE would (the episode
+#     is truncated by SimError) instead of hanging in the next collision detection;
+#   - the force labels count 33 substeps per control step (1/7.5 s / 4 ms, truncated) and read each
+#     device's own contacts (a wire inside the catheter reads 0);
+#   - the episode starts with the wire alone pushed 40 mm in, the catheter at the insertion point
+#     (start: WireFirst; user decision 2026-11-04): there, on the centerline of the descending aorta,
+#     a hook out of the catheter without the wire's shaft in it cannot open (it reaches ~19 mm to
+#     one side) and pressed on the wall with 3-7 N (9 N at an impact). Keeping the wire ahead
+#     afterwards is left to the policy (no shell rule); with random actions the opening alone cut
+#     the steps with > 2 N on the catheter tip in the first 40 mm from 124 to 12 of ~3000
+#     (docs/simulator_changes.md, problem 23; two_device/README.md, "开局");
+#   - two wall monitors (2026-11-07, two_device/wall.py): the WallDistance monitor measures every
+#     device collision point's clearance to the vessel mesh each step; the wall_penetration label
+#     records the deepest penetration, WallBreach truncates the episode once a centerline is outside
+#     the mesh (the physics was wrong from there on) and WallInfo reports it as info["wall_breached"],
+#     on which the trainers drop that step and close the episode as 'breach' (counted apart from NaN
+#     errors, no -1; user decision 2026-11-09); the substep_motion label records the largest node move
+#     per substep, to be read against the alarm distance;
+#   - TipForceBlowup (2026-11-09): a single contact pushing > 30 N in any substep is a contact-solve
+#     blow-up (measured 2026-11-03: 0.6 -> 6 -> 38 -> 1360 -> 3109 N step by step, all finite; the largest
+#     legitimate tip force over 52k validated steps was 12 N), marked a simulation error like NaN and the
+#     step dropped; info["force_blowup_N"] says which;
+#   - trim_sheathed (2026-11-09, problem 26, needs our BeamAdapter build with startCurvAbs): the wire's
+#     collision chain starts at the catheter's tip, not the insertion point (the sheathed part is strictly
+#     inside the catheter's collision body and never touched anything); ~8 % per step, 20 scripted + 60
+#     random episodes identical to the untrimmed run (success, forces, no breach).
+extends: two_devices_round1.yaml
+
+run:
+  name: two_devices_real_mass
+
+env:
+  scene:
+    instruments:
+      - {type: Angled, name: guidewire, velocity_limit: [40.0, 3.1415926], length: 450,
+         diameter_outer: 0.89, young_modulus: 24900.0, flex_length: 30.0, flex_diameter_outer: 0.89,
+         flex_young_modulus: 325.0, tip_radius: 12.1, tip_angle_deg: 72.0,
+         mass_density: 6.45e-9, flex_mass_density: 6.45e-9}
+      - {type: HookCatheter, velocity_limit: [25.0, 1.5707963], mass_density: 1.2e-9, young_modulus: 660.0}
+    simulation: {dt_simulation: 0.004, alarm_distance: 1.0, instrument_collision: true,
+                 min_beam_length: 0.05, stop_on_nan: true, densest_sampling: true, trim_sheathed: true}
+
+  start: {type: WireFirst, wire_mm: 40.0}
+
+  monitors:                    # the referee, and the devices' clearance to the vessel mesh (two_device/wall.py)
+    - {name: phase_detector, type: PhaseDetector}
+    - {name: wall_distance, type: WallDistance}
+  truncation: [PhaseCutoff, {type: MaxSteps, max_steps: 600}, SimError, WallBreach, TipForceBlowup]
+  info: [PhaseInfo, ShieldInfo, WallInfo, ForceBlowupInfo]   # info["wall_breached"], info["force_blowup_N"]: steps the trainers drop
+
+  labels:
+    - {name: distal_force, type: InstrumentTipForce, instrument: 0, statistic: max, distal_length_mm: 3.0,
+       expected_substeps: 33}
+    - {name: catheter_tip_force, type: CatheterTipForce, statistic: max, distal_length_mm: 3.0,
+       expected_substeps: 33}
+    - {name: wire_tip_clearance, type: TipClearance, instrument: 0}
+    - {name: catheter_tip_clearance, type: TipClearance, instrument: 1}
+    - {name: substep_motion, type: SubstepMotion}            # largest node move in a substep, mm
+    - {name: wall_penetration, type: WallPenetration}        # deepest device wall past the mesh wall, mm

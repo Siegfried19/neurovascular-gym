@@ -1,0 +1,98 @@
+# Two devices, first training round (todo_list/two_devices_training.md): a guidewire and the lab's
+# hooked catheter from the descending aorta over the arch, into the brachiocephalic trunk and up the
+# right common carotid. MDP parts: guidewire_rl/env/two_device/ (what each does: their docstrings).
+#
+# On phantom_friction.yaml: stEVE's default device masses, 6 ms physics step, collision alarm
+# distance 0.5 mm, wall friction 0.1 (the real masses at 2 ms go numerically unstable with two
+# devices and cost 0.5-0.7 s per step: the plan, section 0). Changed here:
+#   - vessels: the rebuilt phantom without the right arm (model's own inner wall and centerlines);
+#   - devices: Angled with the measured Glidewire stiffness (shaft E 24.9 GPa, 30 mm soft tip at
+#     0.325 GPa, both 0.89 mm; masses left at the default) + the lab's HookCatheter; velocity limits
+#     = the safety shell's speed limits, so the policy's [-1, 1] spans exactly what is allowed;
+#   - C-arm: [61.0, -21.0] (LAO 25, cranial 10: the angle that keeps all five vessels apart);
+#     one angle per target instead (here the right carotid's, chosen for its whole route from the
+#     aorta: [52.0, -12.2], LAO 15, cranial 7.5): image_rot_zx: per_target
+#     (guidewire_rl/env/c_arm/README.md, "In training"; added 2026-11-03, after this round);
+#   - target: 35-55 mm into the right carotid, even candidates for training (``split: eval`` for
+#     evaluation: --set env.scene.target.split=eval);
+#   - no stEVE pathfinder (the route's own ruler is used).
+extends: phantom_friction.yaml
+
+run:
+  name: two_devices_round1
+
+env:
+  scene:
+    vessel_tree: {type: BiroPhantomArch, version: rebuilt_cut}
+    instruments:
+      - {type: Angled, name: guidewire, velocity_limit: [40.0, 3.1415926], length: 450,
+         diameter_outer: 0.89, young_modulus: 24900.0, flex_length: 30.0, flex_diameter_outer: 0.89,
+         flex_young_modulus: 325.0, tip_radius: 12.1, tip_angle_deg: 72.0}
+      - {type: HookCatheter, velocity_limit: [25.0, 1.5707963]}
+    fluoroscopy: {image_rot_zx: [61.0, -21.0]}
+    target: {type: RouteWindowTarget, threshold: 5.0, split: train, branches: null}
+  pathfinder: null
+
+  monitors:                    # built once, stepped right after the simulator
+    - {name: phase_detector, type: PhaseDetector}
+
+  observation:                 # 110 values, in this order
+    - {name: wire_tip, type: InstrumentTip2D, instrument: 0, wrappers: [TipNoise2D, Normalize2DTask]}
+    - {name: wire_shape, type: InstrumentShape2D, instrument: 0, n_points: 4, spacing_mm: 4.0}
+    - {name: cath_tip, type: InstrumentTip2D, instrument: 1, wrappers: [TipNoise2D, Normalize2DTask]}
+    - {name: cath_shape, type: InstrumentShape2D, instrument: 1, n_points: 6, spacing_mm: 10.0}
+    - {name: target, type: TaskTarget2D, wrappers: [Normalize2DTask]}
+    - {name: junctions, type: JunctionMap2D}
+    - {name: inserted, type: InsertionLengthsNormalized}
+    - {name: d, type: InsertionDiff}
+    - {name: rotation, type: Rotations}
+    - {name: last_actions, type: LastAction, wrappers: [Normalize, {type: Memory, n_steps: 3, reset_mode: 1}]}
+    - {name: suggestion, type: ScriptSuggestion}
+    - {name: phase, type: PhaseOneHot}
+    - {name: history, type: FrameHistory, terms: [wire_tip, wire_shape, cath_tip, cath_shape], frames: 2}
+  observation_clip: 1.0
+
+  reward:
+    - {type: LeadingTipProgress, factor: 0.01}
+    - {type: CatheterToF, factor: 0.01}        # was 0.003: at 0.003 the catheter never followed into the carotid (run A2)
+    - {type: HookPrepPotential, factor: 0.006, depth_mm: 35.0}
+    - {type: PhasePotential, factor: 0.2}
+    - {type: WindowPenalty, factor: 0.001, cap_mm: 30.0,   # at most 0.03 per step
+       windows: {0: [10, 80], 1: [-120, 0], 2: [-120, -30], 3: [-100, 80], 4: [15, 45]}}   # P4 upper 60 -> 45: the catheter must follow
+    - {type: EventPenalty, penalties: {wrong_vessel: -0.1}}
+    - {type: ShieldPenalty, factor: 0.05}
+    - {type: StepPenalty, factor: -0.002}
+    - {type: OutcomeReward, success: 2.0, failure: -1.0}   # success 1 -> 2 (run A3): the finish must outweigh the potentials
+  terminal: [PlatformReached, HardFailure]
+  truncation: [PhaseCutoff, {type: MaxSteps, max_steps: 600}, SimError]
+  info: [PhaseInfo, ShieldInfo]
+  # the safety shell (guidewire_rl/env/two_device/actions.py; why these numbers: two_device/README.md):
+  #   no fast bare catheter push in a branch (d < -10 mm: push cut to 0.15 = 3.75 mm/s);
+  #   force limits: catheter = 1.5 x the 99th percentile of a careful hand-written procedure's tip forces
+  #   (3 episodes, 1260 steps, 2026-10-31: catheter 1.613 N; that rule gave the wire 0.64 N, raised to 1.0 N
+  #   because the scripted wire stalled at the brachiocephalic fork under 0.64 N, WP-B 2/20), catheter
+  #   x2 in P1 (4.84 N); random actions reach 15 N (wire) and 19 N (catheter) at their 99th;
+  #   same-length band 2.5 mm; residual box off (the planner owns it: planning.residual)
+  action: {type: TwoDeviceGuarded, bare_push_d_mm: -10.0, bare_push_max: 0.15,
+           force_limits_N: [1.0, 2.42], force_limit_hook_factor: 2.0, protector_mm: 2.5,
+           branch_push_max: 0.5, residual_phases: []}   # in a branch the catheter push is capped at 12.5 mm/s (the wire cap at 20 mm/s made the script run out of steps: 0/20)
+
+  labels:                      # measured each step, never observed; training answers and the shell's force limit
+    - {name: distal_force, type: InstrumentTipForce, instrument: 0, statistic: max, distal_length_mm: 3.0,
+       expected_substeps: 22}
+    - {name: catheter_tip_force, type: CatheterTipForce, statistic: max, distal_length_mm: 3.0,
+       expected_substeps: 22}
+    - {name: wire_tip_clearance, type: TipClearance, instrument: 0}
+    - {name: catheter_tip_clearance, type: TipClearance, instrument: 1}
+
+# --- trainer side (guidewire_rl/train/, the plan's WP-C) ---
+replay:
+  stratify_by: phase           # once a phase has > 20k samples, each batch draws the phases equally
+
+training:
+  step_timeout_s: 120
+  worker_max_rss_mb: 1500      # a scene process above this when its episode ends is replaced by a
+                               # fresh one (SOFA keeps ~24 MB per 1000 steps; 2026-11-01 OOM at 2.4 GB x 20)
+  cutoff_mixture: {phases: [2, 3, 4, 5], min_weight: 0.1, frontier_min: 0.4, window_episodes: 500,
+                   update_every: 50000}
+  demos: {dir: runs/demos_round1, fraction: 0.08}

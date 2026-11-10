@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guidewire-rl"
+version = "0.1.0"
+description = "Modular TD-MPC2 training for stEVE guidewire navigation (G13 retraining and beyond)"
+requires-python = ">=3.10,<3.13"
+# Versions pinned in environment.yml (conda env guidewire_rl, Python 3.12, SOFA 25.12). Not on PyPI and
+# installed separately (README.md): SOFA 25.12 with SofaPython3, our patched BeamAdapter, and stEVE
+# (package `eve`, editable install of the pinned upstream commit). The old env contact_aware_tdmpc2
+# (Python 3.10, SOFA 23.06, eve = reference/contact-aware-tdmpc2) is only for reproducing G13.
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "torch>=2.7",
+    "gymnasium>=1.0",
+    "pyyaml>=6.0",
+    "trimesh>=4.0",
+    "pyvista>=0.44",
+    "scikit-image>=0.24",
+    "matplotlib>=3.9",
+    "viser>=1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["guidewire_rl*", "simulator_modifications*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "sofa: builds a real SOFA scene (slow, needs the SOFA env vars)",
+    "checkpoint: needs reference/checkpoints_g13/step_260000.pt",
+    "upstream: needs upstream stEVE (conda env guidewire_rl, SOFA 25.12)",
+    "reference: needs the reference package / Wilson's eve (conda env contact_aware_tdmpc2)",
+    "slow: takes minutes without SOFA (the C-arm angle search); skipped unless pytest --run-slow",
+]

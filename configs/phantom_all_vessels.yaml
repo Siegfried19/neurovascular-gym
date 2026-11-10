@@ -1,0 +1,16 @@
+# phantom_root.yaml with a centerline for every vessel of the phantom (user decision 2026-10-27).
+# The six training branches cover about 72 % of the collision mesh; the rest of the lab's vessels
+# (head, arms, coronaries, and the parts of rsa, rcca, lcca, lsa past where the lab cut them) are
+# added as extra branches (phantom_arch_all.json, made by guidewire_rl/env/vessels/biro_phantom_all.py),
+# so the branch tubes fill the mesh. The collision mesh, the targets and the 2D coordinate range are
+# unchanged. What changes: the vessel geometry observation is right everywhere, the reward's path
+# length follows the vessel the tip is in, and stEVE stops the push only at real vessel ends (no
+# longer at the cut ends of the four target branches).
+extends: phantom_root.yaml
+
+run:
+  name: phantom_all_vessels
+
+env:
+  scene:
+    vessel_tree: {centerline: all_vessels}

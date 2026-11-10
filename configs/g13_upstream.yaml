@@ -1,0 +1,22 @@
+# The G13 task on the simulator we develop: upstream stEVE (workspace stEVE/, branch dev)
+# on SOFA 25.12, conda env `guidewire_rl`. Everything is g13.yaml's except what upstream
+# stEVE renamed: the guidewire is `Angled` with its defaults (user decision 2026-10-23)
+# instead of `JShaped`, listed under `instruments:`.
+#
+# The scene names resolve to our fixed classes (simulator_modifications/): SofaBeamAdapter
+# (hollow catheters), CenterlineRandom (seeded resets on Python 3.12).
+#
+# Physically this is NOT G13's simulator; see docs/simulator_changes.md:
+#   - constraint solver: upstream's LCP, not G13's Gauss-Seidel (problem 12, undecided);
+#     the distal_force label reads LCP's constraint forces;
+#   - guidewire: Angled has a 30 mm soft section and BeamAdapter picks the beam count
+#     (problem 13).
+extends: g13.yaml
+
+run:
+  name: g13_upstream
+
+env:
+  scene:
+    devices: null
+    instruments: [{type: Angled}]                  # 450 mm J-tip guidewire, upstream defaults

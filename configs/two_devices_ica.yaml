@@ -1,0 +1,41 @@
+# two_devices_real_mass.yaml with the task's end point moved into the right internal carotid (the
+# whole route of Robertshaw 2026, from our insertion point in the descending aorta; user decision
+# 2026-11-06). Changed here, all with existing parameters:
+#   - target: 20-40 mm past the carotid's ICA/ECA split (the split is 90.9 mm past the carotid's
+#     opening on rebuilt_cut, so 111-131 mm along the carotid chain; even candidates for training,
+#     --set env.scene.target.split=eval for the odd ones). The window starts at +20 so that the
+#     catheter can be >= 5 mm into the ICA with the wire 15 mm ahead (the user's "10-40" could not);
+#   - referee: success needs the catheter >= 5 mm past the split (96 mm along the chain, the
+#     'cath_in_rcca' threshold; F for the CatheterToF reward moves there too); the wire past the
+#     carotid's first fork (64 mm) is no longer an event;
+#   - MaxSteps 800: the scripted controller needs 510-530 steps for a clean run (two_device/script.py);
+#   - C-arm per target (image_rot_zx: per_target; the direction agreed 2026-11-03, switched on for round
+#     two 2026-11-09): each episode uses the angle chosen for the whole route to the target's branch,
+#     the right carotid and its continuation into the ICA: LAO 15, cranial 7.5 = stEVE [52.0, -12.2]
+#     (c_arm/README.md), instead of round one's fixed [61.0, -21.0];
+#   - discount pinned at 0.99375 (training.discount_min = discount_max; user decision 2026-11-09): the
+#     TD-MPC2 heuristic 1 - 5 / MaxSteps (clipped to [0.95, 0.995]) gave 0.975 for G13's 200 steps,
+#     0.9917 for round one's 600 and 0.99375 for these 800; the step limit is set for the script's
+#     margin, gamma for how far the finish reward reaches back, so the two are no longer tied;
+#   - NOT changed yet (round two): the 2D box of the observations (route.py, TASK_BOUNDS_RCCA_REST_MM
+#     = 100 mm) stops short of these targets, so TaskTarget2D clips them; training on this config
+#     needs that limit raised.
+extends: two_devices_real_mass.yaml
+
+run:
+  name: two_devices_ica
+
+env:
+  scene:
+    fluoroscopy: {image_rot_zx: per_target}      # the target branch's route angle (rcca: [52.0, -12.2])
+    target: {type: RouteWindowTarget, threshold: 5.0, split: train, branches: null,
+             depth_min_mm: 111.0, depth_max_mm: 131.0}
+  monitors:
+    - {name: phase_detector, type: PhaseDetector, catheter_goal_depth_mm: 96.0,
+       thresholds: {cath_in_rcca: 96.0, fork: 1000.0, fork_out: 999.0}}
+    - {name: wall_distance, type: WallDistance}
+  truncation: [PhaseCutoff, {type: MaxSteps, max_steps: 800}, SimError, WallBreach, TipForceBlowup]
+
+training:
+  discount_min: 0.99375        # gamma pinned: 1 - 5/800 (what the heuristic gave); see the header
+  discount_max: 0.99375

@@ -1,0 +1,123 @@
+diff --git a/src/BeamAdapter/component/controller/InterventionalRadiologyController.h b/src/BeamAdapter/component/controller/InterventionalRadiologyController.h
+index 6685a498..759eca29 100644
+--- a/src/BeamAdapter/component/controller/InterventionalRadiologyController.h
++++ b/src/BeamAdapter/component/controller/InterventionalRadiologyController.h
+@@ -147,6 +147,8 @@ private:
+     * Need each tool starting position to sample only activated nodes and tool total length (combined deployed tool lengths)
+     **/
+     void computeInstrumentsCurvAbs(type::vector<Real>& newCurvAbs, const type::vector<Real>& tools_xBegin, const Real& totalLength);
++    /// computeInstrumentsCurvAbs's sampling when d_densestSampling is on: the densest section covering each stretch
++    void computeDensestCurvAbs(type::vector<Real>& newCurvAbs, const type::vector<Real>& tools_xBegin);
+ 
+     /// Method to sort the curv Abs in the ascending order and remove doubloon that are closer than d_threshold
+     void sortCurvAbs(type::vector<Real>& curvAbs);
+@@ -169,6 +171,7 @@ public:
+     Data<Coord>          d_startingPos;
+     Data<Real>           d_threshold;
+     Data<Real>           d_minBeamLength;
++    Data<bool>           d_densestSampling;
+     Data<type::vector<Real>>   d_rigidCurvAbs; // Pairs (start - end)
+     Data<std::string>    d_motionFilename;
+     Data<unsigned int>   d_indexFirstNode; // First Node simulated
+diff --git a/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl b/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl
+index 5d52cf71..a5b255b2 100644
+--- a/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl
++++ b/src/BeamAdapter/component/controller/InterventionalRadiologyController.inl
+@@ -68,6 +68,7 @@ InterventionalRadiologyController<DataTypes>::InterventionalRadiologyController(
+ , d_startingPos(initData(&d_startingPos,Coord(),"startingPos","starting pos for inserting the instrument"))
+ , d_threshold(initData(&d_threshold, (Real)0.01, "threshold", "threshold for controller precision which is homogeneous to the unit of length used in the simulation"))
+ , d_minBeamLength(initData(&d_minBeamLength, (Real)0.0, "minBeamLength", "shortest beam: when the nodes are sampled, a node closer than this to the previous one is dropped (as threshold does; 0 or less than threshold: threshold is used)"))
++, d_densestSampling(initData(&d_densestSampling, false, "densestSampling", "where instruments overlap, sample each stretch with the densest instrument section covering it (false: the first instrument listed samples the whole overlap, later ones only beyond it)"))
+ , d_rigidCurvAbs(initData(&d_rigidCurvAbs, "rigidCurvAbs", "pairs of curv abs for beams we want to rigidify"))
+ , d_motionFilename(initData(&d_motionFilename, "motionFilename", "text file that includes tracked motion from optical sensor"))
+ , d_indexFirstNode(initData(&d_indexFirstNode, (unsigned int) 0, "indexFirstNode", "first node (should be fixed with restshape)"))
+@@ -539,6 +540,77 @@ void InterventionalRadiologyController<DataTypes>::applyAction(BeamAdapterAction
+ }
+ 
+ 
++template <class DataTypes>
++void InterventionalRadiologyController<DataTypes>::computeDensestCurvAbs(type::vector<Real> &newCurvAbs,
++    const type::vector<Real>& tools_xBegin)
++{
++    // The same key points and the same grids as computeInstrumentsCurvAbs (each section sampled
++    // backwards from its end at its own density), but each stretch of the combined instrument takes
++    // the grid of the densest section covering it; on a tie the instrument listed first, which is
++    // what computeInstrumentsCurvAbs gives everywhere (a later instrument only beyond the others).
++    struct Section { Real begin, end, ratio; };
++    type::vector<Section> sections;
++    type::vector<Real> cuts{ Real(0) };
++    for (sofa::Size i = 0; i < m_instrumentsList.size(); i++)
++    {
++        type::vector<Real> xP_noticeable_I;
++        type::vector<sofa::Size> density_I;
++        m_instrumentsList[i]->getSamplingParameters(xP_noticeable_I, density_I);
++        if (xP_noticeable_I.empty())
++        {
++            msg_error() << "Instrument " << i << " provides no sampling parameters (no noticeable point). Skipping it.";
++            continue;
++        }
++        for (int j = 0; j < (int)(xP_noticeable_I.size() - 1); j++)
++        {
++            const Real xP = xP_noticeable_I[j];
++            const Real nxP = xP_noticeable_I[j + 1];
++            const Real curvAbs_xP = tools_xBegin[i] + xP;
++            const Real curvAbs_nxP = tools_xBegin[i] + nxP;
++            if (curvAbs_xP > 0)
++                newCurvAbs.push_back(curvAbs_xP);
++            if (curvAbs_nxP > 0)
++            {
++                const Real begin = std::max(curvAbs_xP, Real(0));
++                sections.push_back({ begin, curvAbs_nxP, Real(density_I[j]) / (nxP - xP) });
++                cuts.push_back(begin);
++                cuts.push_back(curvAbs_nxP);
++            }
++        }
++        const Real curvAbs_lastxP = tools_xBegin[i] + xP_noticeable_I[xP_noticeable_I.size() - 1];
++        if (curvAbs_lastxP > 0)
++            newCurvAbs.push_back(curvAbs_lastxP);
++    }
++
++    std::sort(cuts.begin(), cuts.end());
++    cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
++    for (sofa::Size c = 0; c + 1 < cuts.size(); c++)
++    {
++        const Real from = cuts[c], to = cuts[c + 1], middle = Real(0.5) * (from + to);
++        int best = -1;
++        for (int s = 0; s < (int)sections.size(); s++)
++        {
++            const Section& section = sections[s];
++            if (section.begin <= middle && middle <= section.end
++                && (best < 0 || section.ratio > sections[best].ratio))
++                best = s;
++        }
++        if (best < 0 || sections[best].ratio <= 0)
++            continue;
++        const Section& section = sections[best];
++        // grid nodes end - k / ratio inside (from, to); "from" and "to" are key points, tips or 0
++        const int kFirst = std::max(1, int(std::ceil((section.end - to) * section.ratio)));
++        const int kLast = int(std::floor((section.end - from) * section.ratio));
++        for (int k = kLast; k >= kFirst; k--)
++        {
++            const Real value = section.end - (k / section.ratio);
++            if (value > from && value < to)
++                newCurvAbs.push_back(value);
++        }
++    }
++}
++
++
+ template <class DataTypes>
+ void InterventionalRadiologyController<DataTypes>::computeInstrumentsCurvAbs(type::vector<Real> &newCurvAbs,
+     const type::vector<Real>& tools_xBegin,
+@@ -548,6 +620,11 @@ void InterventionalRadiologyController<DataTypes>::computeInstrumentsCurvAbs(typ
+     // Step 2 => add the beams given the sampling parameters
+     double maxAbsLength=0.0;
+     Real xSampling = 0.0;
++    if (d_densestSampling.getValue())
++    {
++        computeDensestCurvAbs(newCurvAbs, tools_xBegin);
++    }
++    else
+     for (sofa::Size i=0; i<m_instrumentsList.size(); i++)
+     {
+         type::vector<Real> xP_noticeable_I;

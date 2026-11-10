@@ -1,0 +1,23 @@
+# conda 环境 guidewire_rl：Python 3.12 + SOFA 25.12 的 SofaPython3 + 本仓库。
+#   conda env create -f environment.yml
+# 之后还要：装 stEVE（editable）、装本仓库（editable）、写 SOFA 的环境变量、编 BeamAdapter——步骤见 README.md。
+# 版本是 2026-11-10 实际在用的；torch 是 CUDA 12.8 的轮子，没有 NVIDIA 卡就把 extra-index-url 那行去掉装 CPU 版。
+name: guidewire_rl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.7.1
+      - numpy==2.5.4
+      - scipy==1.18.1
+      - gymnasium==1.4.0
+      - pyyaml==6.0.3
+      - trimesh==5.2.0
+      - pyvista==0.49.1
+      - scikit-image==0.26.0
+      - matplotlib==3.11.2
+      - viser==1.1.1
+      - pytest==9.1.1

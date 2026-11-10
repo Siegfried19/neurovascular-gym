@@ -1,0 +1,661 @@
+{
+  "what": "C-arm angle per target branch (scored over the target's route; method.route) and for all 5 targets together, from guidewire_rl/env/c_arm/choose_angle.py (method: README.md next to it); training reads it for env.scene.fluoroscopy.image_rot_zx: per_target (per_target.py)",
+  "command": "conda run --no-capture-output -n guidewire_rl python -m guidewire_rl.env.c_arm.choose_angle --centerline all_vessels --write-table",
+  "date": "2026-11-03",
+  "centerline": {
+    "input": "all_vessels",
+    "file": "phantom_arch_all.json",
+    "sha256": "acdd043a931a1365a3236ba0be44ed004d3774d34b23cd926755c856c5c447e8",
+    "branches": 75,
+    "rotation_z_deg": 37.67
+  },
+  "method": {
+    "route": "whole",
+    "route_before_mm": 60.0,
+    "route_past_mm": 0.0,
+    "apart_mm": 5.0,
+    "step_deg": 2.5,
+    "lao_range_deg": [
+      -50.0,
+      90.0
+    ],
+    "cranial_range_deg": [
+      -40.0,
+      40.0
+    ],
+    "robust_deg": 5.0,
+    "cover_tol": 0.05,
+    "keep_frac": 0.98,
+    "route_branches": [
+      "aorta",
+      "bct",
+      "rsa",
+      "rcca",
+      "lcca",
+      "lsa"
+    ],
+    "targets": [
+      "bct",
+      "rcca",
+      "rsa",
+      "lcca",
+      "lsa"
+    ],
+    "continues_mm": 0.05
+  },
+  "conventions": "image_rot_zx: stEVE's [rot_z, rot_x], degrees; lao_deg: LAO + / RAO -; cranial_deg: cranial + / caudal -; the clinical names assume the phantom's scan frame is the patient's LPS (README.md, Method)",
+  "continuations": {
+    "v10_rest": "rcca",
+    "v8_rest": "rsa",
+    "v7_rest": "lcca",
+    "v6_rest": "lsa"
+  },
+  "angles": {
+    "all": {
+      "image_rot_zx": [
+        57.67,
+        -0.0
+      ],
+      "lao_deg": 20.0,
+      "cranial_deg": 0.0,
+      "clinical": "LAO 20.0, cranial 0.0",
+      "scores": {
+        "bct": {
+          "length_kept": 0.9656377137650328,
+          "share_covered": 0.08076130453461959,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9745045718244755,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9570703873879918,
+              "share_covered": 0.15949672417888985
+            }
+          }
+        },
+        "rcca": {
+          "length_kept": 0.9556060159588153,
+          "share_covered": 0.29252344326833774,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9745045718244755,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9570703873879918,
+              "share_covered": 0.16080132098801816
+            },
+            "rcca": {
+              "length_mm": 37.52950096715102,
+              "length_kept": 0.9230158876218161,
+              "share_covered": 0.980428255083664
+            }
+          }
+        },
+        "rsa": {
+          "length_kept": 0.9330204853354607,
+          "share_covered": 0.24210958419788525,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9745045718244755,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9570703873879918,
+              "share_covered": 0.16080132098801816
+            },
+            "rsa": {
+              "length_mm": 41.7959556205866,
+              "length_kept": 0.8378730218506372,
+              "share_covered": 0.7121163526813704
+            }
+          }
+        },
+        "lcca": {
+          "length_kept": 0.9576647965354549,
+          "share_covered": 0.12047858319105953,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.99405837384405,
+              "length_kept": 0.9457411768652422,
+              "share_covered": 0.0
+            },
+            "lcca": {
+              "length_mm": 58.610521003520184,
+              "length_kept": 0.9698698805762413,
+              "share_covered": 0.24383322783313813
+            }
+          }
+        },
+        "lsa": {
+          "length_kept": 0.9387704736299528,
+          "share_covered": 0.18033563711834344,
+          "pieces": {
+            "aorta": {
+              "length_mm": 58.61130823872584,
+              "length_kept": 0.9221708432291318,
+              "share_covered": 0.0
+            },
+            "lsa": {
+              "length_mm": 59.14775955586808,
+              "length_kept": 0.9552195506766059,
+              "share_covered": 0.36096973407556837
+            }
+          }
+        }
+      }
+    },
+    "bct": {
+      "image_rot_zx": [
+        61.23888728533773,
+        -32.541322939989506
+      ],
+      "lao_deg": 27.5,
+      "cranial_deg": 15.0,
+      "clinical": "LAO 27.5, cranial 15.0",
+      "scores": {
+        "bct": {
+          "length_kept": 0.9706331252421873,
+          "share_covered": 0.0,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9721453312187128,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.969172003155496,
+              "share_covered": 0.0
+            }
+          }
+        },
+        "rcca": {
+          "length_kept": 0.9303372448994752,
+          "share_covered": 0.22731373498872473,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9721453312187128,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.969172003155496,
+              "share_covered": 0.0
+            },
+            "rcca": {
+              "length_mm": 37.52950096715102,
+              "length_kept": 0.799427409177808,
+              "share_covered": 0.9682674132209608
+            }
+          }
+        },
+        "rsa": {
+          "length_kept": 0.9462279635769993,
+          "share_covered": 0.16708961797747593,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9721453312187128,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.969172003155496,
+              "share_covered": 0.0
+            },
+            "rsa": {
+              "length_mm": 41.7959556205866,
+              "length_kept": 0.8750358562097661,
+              "share_covered": 0.6560117901213048
+            }
+          }
+        },
+        "lcca": {
+          "length_kept": 0.9265418594490311,
+          "share_covered": 0.10812111659239251,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.99405837384405,
+              "length_kept": 0.9568292025020211,
+              "share_covered": 0.0
+            },
+            "lcca": {
+              "length_mm": 58.610521003520184,
+              "length_kept": 0.8955395650486694,
+              "share_covered": 0.21882329753029928
+            }
+          }
+        },
+        "lsa": {
+          "length_kept": 0.9182020638076573,
+          "share_covered": 0.19276136101769586,
+          "pieces": {
+            "aorta": {
+              "length_mm": 58.61130823872584,
+              "length_kept": 0.9233420473982971,
+              "share_covered": 0.0
+            },
+            "lsa": {
+              "length_mm": 59.14775955586808,
+              "length_kept": 0.9131086982290603,
+              "share_covered": 0.3858417467477074
+            }
+          }
+        }
+      }
+    },
+    "rcca": {
+      "image_rot_zx": [
+        50.18015696890659,
+        -23.83896736704234
+      ],
+      "lao_deg": 15.0,
+      "cranial_deg": 15.0,
+      "clinical": "LAO 15.0, cranial 15.0",
+      "scores": {
+        "bct": {
+          "length_kept": 0.9682682403865379,
+          "share_covered": 0.09027024446237424,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9583974898612002,
+              "share_covered": 0.18286316816022732
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9778055466984235,
+              "share_covered": 0.0
+            }
+          }
+        },
+        "rcca": {
+          "length_kept": 0.9343509478084652,
+          "share_covered": 0.15398848014374683,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9583974898612002,
+              "share_covered": 0.18286316816022732
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9778055466984235,
+              "share_covered": 0.0
+            },
+            "rcca": {
+              "length_mm": 37.52950096715102,
+              "length_kept": 0.8241633265986399,
+              "share_covered": 0.3619163897155713
+            }
+          }
+        },
+        "rsa": {
+          "length_kept": 0.9466233252402073,
+          "share_covered": 0.205254957092438,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9583974898612002,
+              "share_covered": 0.18286316816022732
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9778055466984235,
+              "share_covered": 0.0
+            },
+            "rsa": {
+              "length_mm": 41.7959556205866,
+              "length_kept": 0.8834831115349128,
+              "share_covered": 0.5419203359884641
+            }
+          }
+        },
+        "lcca": {
+          "length_kept": 0.9163427575758483,
+          "share_covered": 0.3493634850906109,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.99405837384405,
+              "length_kept": 0.9049591627950667,
+              "share_covered": 0.452433263411964
+            },
+            "lcca": {
+              "length_mm": 58.610521003520184,
+              "length_kept": 0.9279950691077888,
+              "share_covered": 0.24383322783313813
+            }
+          }
+        },
+        "lsa": {
+          "length_kept": 0.8954979888913104,
+          "share_covered": 0.5915143810603827,
+          "pieces": {
+            "aorta": {
+              "length_mm": 58.61130823872584,
+              "length_kept": 0.8463615485298951,
+              "share_covered": 0.7098397890502981
+            },
+            "lsa": {
+              "length_mm": 59.14775955586808,
+              "length_kept": 0.9441887774080993,
+              "share_covered": 0.47299314165983464
+            }
+          }
+        }
+      }
+    },
+    "rsa": {
+      "image_rot_zx": [
+        56.31969089774941,
+        -18.24788234324903
+      ],
+      "lao_deg": 20.0,
+      "cranial_deg": 10.0,
+      "clinical": "LAO 20.0, cranial 10.0",
+      "scores": {
+        "bct": {
+          "length_kept": 0.9732661406317114,
+          "share_covered": 0.03602338661224977,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9712838960089732,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9751814229705377,
+              "share_covered": 0.07114313211744332
+            }
+          }
+        },
+        "rcca": {
+          "length_kept": 0.9456016952435998,
+          "share_covered": 0.19509720806808736,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9712838960089732,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9751814229705377,
+              "share_covered": 0.07103270648815456
+            },
+            "rcca": {
+              "length_mm": 37.52950096715102,
+              "length_kept": 0.8557277932395276,
+              "share_covered": 0.7137078727909324
+            }
+          }
+        },
+        "rsa": {
+          "length_kept": 0.9464440320240642,
+          "share_covered": 0.16987594346311452,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9712838960089732,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.9751814229705377,
+              "share_covered": 0.07103270648815456
+            },
+            "rsa": {
+              "length_mm": 41.7959556205866,
+              "length_kept": 0.8682014675203837,
+              "share_covered": 0.5616258121382224
+            }
+          }
+        },
+        "lcca": {
+          "length_kept": 0.9368661791005972,
+          "share_covered": 0.11429847282783669,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.99405837384405,
+              "length_kept": 0.935309200167981,
+              "share_covered": 0.0
+            },
+            "lcca": {
+              "length_mm": 58.610521003520184,
+              "length_kept": 0.938459911477837,
+              "share_covered": 0.23132547568070846
+            }
+          }
+        },
+        "lsa": {
+          "length_kept": 0.9199833443143145,
+          "share_covered": 0.2052227403562545,
+          "pieces": {
+            "aorta": {
+              "length_mm": 58.61130823872584,
+              "length_kept": 0.8948113452406335,
+              "share_covered": 0.0
+            },
+            "lsa": {
+              "length_mm": 59.14775955586808,
+              "length_kept": 0.9449270413836659,
+              "share_covered": 0.4107851293088725
+            }
+          }
+        }
+      }
+    },
+    "lcca": {
+      "image_rot_zx": [
+        55.16027249520894,
+        42.05679253215445
+      ],
+      "lao_deg": 25.0,
+      "cranial_deg": -22.5,
+      "clinical": "LAO 25.0, caudal 22.5",
+      "scores": {
+        "bct": {
+          "length_kept": 0.9023671741559368,
+          "share_covered": 0.12882836570300757,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9813899877989383,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.826013833302497,
+              "share_covered": 0.25442509168659677
+            }
+          }
+        },
+        "rcca": {
+          "length_kept": 0.9205712183918764,
+          "share_covered": 0.33387191647088027,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9813899877989383,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.826013833302497,
+              "share_covered": 0.2555823443402543
+            },
+            "rcca": {
+              "length_mm": 37.52950096715102,
+              "length_kept": 0.9797109721366491,
+              "share_covered": 1.0
+            }
+          }
+        },
+        "rsa": {
+          "length_kept": 0.8651961584902966,
+          "share_covered": 0.2416301582487825,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9813899877989383,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.826013833302497,
+              "share_covered": 0.2555823443402543
+            },
+            "rsa": {
+              "length_mm": 41.7959556205866,
+              "length_kept": 0.7567648776603864,
+              "share_covered": 0.5696953167259114
+            }
+          }
+        },
+        "lcca": {
+          "length_kept": 0.977811993581553,
+          "share_covered": 0.0,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.99405837384405,
+              "length_kept": 0.9808426982524184,
+              "share_covered": 0.0
+            },
+            "lcca": {
+              "length_mm": 58.610521003520184,
+              "length_kept": 0.9747097472642597,
+              "share_covered": 0.0
+            }
+          }
+        },
+        "lsa": {
+          "length_kept": 0.9480604897811179,
+          "share_covered": 0.0155417166230026,
+          "pieces": {
+            "aorta": {
+              "length_mm": 58.61130823872584,
+              "length_kept": 0.984506877724436,
+              "share_covered": 0.0
+            },
+            "lsa": {
+              "length_mm": 59.14775955586808,
+              "length_kept": 0.9119446589538099,
+              "share_covered": 0.031109155162723192
+            }
+          }
+        }
+      }
+    },
+    "lsa": {
+      "image_rot_zx": [
+        56.979328026404396,
+        44.60753632832145
+      ],
+      "lao_deg": 27.5,
+      "cranial_deg": -22.5,
+      "clinical": "LAO 27.5, caudal 22.5",
+      "scores": {
+        "bct": {
+          "length_kept": 0.9037660142645868,
+          "share_covered": 0.12882836570300757,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9872606738320799,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.8230918910904963,
+              "share_covered": 0.25442509168659677
+            }
+          }
+        },
+        "rcca": {
+          "length_kept": 0.9217630920212212,
+          "share_covered": 0.33387191647088027,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9872606738320799,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.8230918910904963,
+              "share_covered": 0.2555823443402543
+            },
+            "rcca": {
+              "length_mm": 37.52950096715102,
+              "length_kept": 0.9802304706354517,
+              "share_covered": 1.0
+            }
+          }
+        },
+        "rsa": {
+          "length_kept": 0.8658674348117072,
+          "share_covered": 0.24610459085725345,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.91396964676174,
+              "length_kept": 0.9872606738320799,
+              "share_covered": 0.0
+            },
+            "bct": {
+              "length_mm": 62.008687571334036,
+              "length_kept": 0.8230918910904963,
+              "share_covered": 0.2555823443402543
+            },
+            "rsa": {
+              "length_mm": 41.7959556205866,
+              "length_kept": 0.7553137833141377,
+              "share_covered": 0.5872624198217834
+            }
+          }
+        },
+        "lcca": {
+          "length_kept": 0.9802639846672254,
+          "share_covered": 0.0,
+          "pieces": {
+            "aorta": {
+              "length_mm": 59.99405837384405,
+              "length_kept": 0.987174763391073,
+              "share_covered": 0.0
+            },
+            "lcca": {
+              "length_mm": 58.610521003520184,
+              "length_kept": 0.9731900727642355,
+              "share_covered": 0.0
+            }
+          }
+        },
+        "lsa": {
+          "length_kept": 0.9502158747995149,
+          "share_covered": 0.0155417166230026,
+          "pieces": {
+            "aorta": {
+              "length_mm": 58.61130823872584,
+              "length_kept": 0.989766964723012,
+              "share_covered": 0.0
+            },
+            "lsa": {
+              "length_mm": 59.14775955586808,
+              "length_kept": 0.9110235006489087,
+              "share_covered": 0.031109155162723192
+            }
+          }
+        }
+      }
+    }
+  }
+}

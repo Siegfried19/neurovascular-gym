@@ -1,0 +1,30 @@
+# phantom_friction.yaml with the guidewire at its real mass (user decision 2026-10-28; the
+# measurements behind every number are in docs/simulator_changes.md, problem 20):
+#   - densities 2.1e-5 -> 6.45e-9 t/mm^3 (nitinol). stEVE's number is BeamAdapter's example value,
+#     platinum in kg/mm^3; in SOFA's N-mm-MPa units it reads as t/mm^3, about 3300x too heavy;
+#   - physics step 6 -> 2 ms. A wire this light moves 1-4 mm in one 6 ms step and goes through the
+#     vessel wall (phantom 1/18 episodes, G13's narrower vessel 4-5/8); at 2 ms it did not in 56
+#     episodes, the only real-mass setting that held on both vessels (3 ms, 4 ms, 100x mass, a
+#     larger alarm distance or more damping all failed somewhere);
+#   - collision alarm distance 0.5 -> 2 mm (LocalMinDistance.alarmDistance; BeamAdapter's own
+#     examples use 2-3 mm). Wall triangles farther than this from a wire point get no constraint,
+#     so a point that moves more than this in one step passes unopposed. It also stops the one exit
+#     the heavy wire had on the phantom;
+#   - the force label counts 66 substeps per control step (1/7.5 s / 2 ms, truncated).
+# Damping (Rayleigh 0.2 / 0.1) is unchanged: it is what lets the collision pipeline keep up, at
+# the price of ~0.2 s relaxation after a deformation and a damping transient on head-on impacts.
+# Cost: ~0.26 s per control step against 0.055 s with phantom_friction.yaml (4-5x).
+# The heavy-wire policies (phantom_g13_20261025, G13) are not transferable: trained on a wire that
+# cannot whip, they push hard where this one leaves the vessel.
+extends: phantom_friction.yaml
+
+run:
+  name: phantom_real_mass
+
+env:
+  scene:
+    instruments: [{type: Angled, mass_density: 6.45e-9, flex_mass_density: 6.45e-9}]
+    simulation: {dt_simulation: 0.002, alarm_distance: 2.0}
+  labels:
+    - {name: distal_force, type: DistalForce, statistic: max, distal_length_mm: 3.0,
+       expected_substeps: 66}

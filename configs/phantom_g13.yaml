@@ -1,0 +1,26 @@
+# The G13 task in the lab's BIRO phantom (user decision 2026-10-24): G13's 22 observations,
+# reward, episode, model and training, on our simulator (g13_upstream.yaml), with
+#   - the vessels: the phantom's six-branch arch (guidewire_rl/env/vessels/biro_phantom/,
+#     vendored from the lab's 47-steve-agent-phantom); the collision mesh is the whole phantom;
+#   - every known error in the observations fixed:
+#       wall clearance / heading / radius compare wire and centerline in one frame (frame: vessel);
+#       the [-1, 1] range of the 2D coordinates covers the whole lumen (problem 15);
+#       wire points along a long segment are no longer stacked (problem 14).
+#     The last two are stEVE fixes that the names Tracking2D / NormalizeTracking2DEpisode
+#     resolve to on upstream stEVE (simulator_modifications/observations.py).
+# Target branches stay G13's list; the phantom has no "co", so stEVE drops it.
+extends: g13_upstream.yaml
+
+run:
+  name: phantom_g13
+
+env:
+  scene:
+    vessel_tree: {type: BiroPhantomArch, seed: null, scaling_xyzd: null}   # null drops g13's arguments
+
+  observation:
+    - {name: position, type: Tracking2D, n_points: 5, wrappers: [NormalizeTracking2DEpisode]}
+    - {name: target, type: Target2D, wrappers: [NormalizeTracking2DEpisode]}
+    - {name: rotation, type: Rotations}
+    - {name: geometry, type: VesselGeometry, frame: vessel,
+       features: [clearance, heading, bend, radius, valid]}

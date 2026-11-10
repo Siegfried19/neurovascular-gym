@@ -1,0 +1,66 @@
+diff --git a/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.h b/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.h
+index daf7ceb4..775cd692 100644
+--- a/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.h
++++ b/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.h
+@@ -154,6 +154,7 @@ public:
+     virtual void reinit() override;
+ 
+     virtual void apply(const MechanicalParams *mparams, Data<VecCoord>& out, const Data<InVecCoord>& in) override;
++    void handleEvent(sofa::core::objectmodel::Event* event) override;
+     virtual void applyJ(const MechanicalParams *mparams, Data<VecDeriv>& out, const Data<InVecDeriv>& in) override;
+     virtual void applyJT(const MechanicalParams *mparams, Data<InVecDeriv>& out, const Data<VecDeriv>& in) override;
+     virtual void applyJT(const ConstraintParams *cparams, Data<InMatrixDeriv>& out, const Data<OutMatrixDeriv>& in) override;
+diff --git a/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.inl b/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.inl
+index 67416ee7..0df9bb1b 100644
+--- a/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.inl
++++ b/src/BeamAdapter/component/mapping/AdaptiveBeamMapping.inl
+@@ -294,6 +294,27 @@ void AdaptiveBeamMapping< TIn, TOut>::apply(const MechanicalParams* mparams, Dat
+     AdvancedTimer::stepEnd("computeNewInterpolation");
+ }
+ 
++template <class TIn, class TOut>
++void AdaptiveBeamMapping< TIn, TOut>::handleEvent(sofa::core::objectmodel::Event* event)
++{
++    // With nbPointsPerBeam the mapped points follow the beams, which an interventional radiology
++    // controller changes at the beginning of the step. The output is otherwise re-sampled only when the
++    // free motion is propagated, after this step's collision detection has used last step's points: a
++    // contact then names a point of the old list, which the constraint is mapped with the new list (the
++    // neighbouring node, or past the end when the count dropped). When listening, re-map right after the
++    // controller (it sits in a parent node), as MultiAdaptiveBeamMapping does. Velocity, free position
++    // and free velocity keep last step's values until the free motion recomputes them; nothing reads them
++    // before (contacts use the free positions only after the free motion).
++    if (sofa::simulation::AnimateBeginEvent::checkEventType(event) && !m_isSubMapping
++        && d_useCurvAbs.getValue() && d_nbPointsPerBeam.getValue() > 0)
++    {
++        apply(sofa::core::mechanicalparams::defaultInstance(),
++              *this->toModel->write(sofa::core::vec_id::write_access::position),
++              *this->fromModel->read(sofa::core::vec_id::read_access::position));
++    }
++}
++
++
+ template <class TIn, class TOut>
+ void AdaptiveBeamMapping< TIn, TOut>::applyJ(const core::MechanicalParams* mparams, Data<VecDeriv>& dOut, const Data<InVecDeriv>& dIn)
+ {
+@@ -649,12 +670,19 @@ void AdaptiveBeamMapping< TIn, TOut>::computeDistribution()
+                 }
+ 
+                 BaseMeshTopology* topo = this->getContext()->getMeshTopology();
+-                if(topo)
++                const int nbEdges = std::max(static_cast<int>(m_pointBeamDistribution.size()) - 1, 0);
++                // When listening: the edges are always (i, i+1), so rebuild them only when their number
++                // changed, and bump the topology revision then: a LineCollisionModel re-reads its edges
++                // only when the revision changes (clear/addEdge do not change it).
++                const bool listening = this->f_listening.getValue();
++                if(topo && (!listening || static_cast<int>(topo->getNbEdges()) != nbEdges))
+                 {
+                     topo->clear();
+-                    int nbEdges = static_cast<int>(m_pointBeamDistribution.size()) - 1;
+                     for(int i=0; i<nbEdges; ++i)
+                         topo->addEdge(i, i+1);
++                    if (listening)
++                        if (auto* container = dynamic_cast<sofa::core::topology::TopologyContainer*>(topo))
++                            container->resetTopologyChangeList();
+                 }
+             }
+             else

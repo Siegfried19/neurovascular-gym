@@ -1,0 +1,14 @@
+# phantom_friction.yaml with the aorta's centerline extended to the bottom of the aortic root
+# (user decision 2026-10-27). The lab centerline stops 16 mm above the bottom of the root
+# (z 20.6 against the collision mesh's 4.4); the extended one (phantom_arch_root.json, made by
+# guidewire_rl/env/vessels/biro_phantom_root.py) reaches 1 mm above it. The collision mesh, and
+# so the physics, is unchanged. What changes near the root: where stEVE stops pushing (the
+# centerline's end), the path length in the reward, and the vessel geometry observation.
+extends: phantom_friction.yaml
+
+run:
+  name: phantom_root
+
+env:
+  scene:
+    vessel_tree: {centerline: root_extended}

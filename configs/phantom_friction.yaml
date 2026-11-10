@@ -1,0 +1,19 @@
+# phantom_g13.yaml with the wire-wall friction coefficient 0.1 instead of 0.001
+# (user decision 2026-10-27; the phantom is expected to be filled with liquid).
+#
+# Where the two numbers come from:
+#   - 0.001: stEVE's smoke-test script examples/function_check.py (no stated reason); G13's
+#     environment mirrors that script and froze it for reproducibility.
+#   - 0.1: stEVE's default and its single-wire benchmarks; the lab's 19/47/51 use it. Lab's
+#     literature notes (51-legobot-ros2/docs/device-mechanics.md §2.7, §4; not checked against
+#     the originals): wet hydrophilic-coated devices 0.07-0.10, dry silicone 0.35-0.6.
+# LCPConstraintSolver takes one mu for every contact; today the only contacts are wire-wall.
+# The final value should be matched on the bench (base pushed vs tip advanced).
+extends: phantom_g13.yaml
+
+run:
+  name: phantom_friction
+
+env:
+  scene:
+    simulation: {friction: 0.1}
