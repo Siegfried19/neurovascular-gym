@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import torch
@@ -51,16 +51,46 @@ def make_replay(config: Mapping[str, Any], *, observation_dim: int, action_dim: 
                          seed=int(t["seed"]))
 
 
-def configure_replay(replay: EpisodeReplay, config: Mapping[str, Any]) -> None:
-    """Phase strata and the demonstration quota, from the config."""
+def reward_recomputation(config: Mapping[str, Any]):
+    """(reward_fn, n_materials) for a config whose env reward is the formula (``env.reward_formula``,
+    two_device/reward_formula.py): the replay recomputes every sampled reward from the stored
+    materials with the config's coefficients. (None, None) otherwise."""
+    spec = config.get("env", {}).get("reward_formula")
+    if not spec:
+        return None, None
+    from ..env.two_device import reward_formula as rf
+    coefficients = rf.Coefficients.from_config(spec)
+    return (lambda materials: rf.compute(materials, coefficients)), len(rf.FIELDS)
+
+
+def configure_replay(replay: EpisodeReplay, config: Mapping[str, Any],
+                     observation_names: Optional[Sequence[str]] = None) -> None:
+    """Phase strata, the demonstration quota, the reward recomputation and the self-demonstration
+    cap, from the config. ``observation_names`` (the env's): where the executed action sits in the
+    observation, for deriving ``action_change`` of episodes recorded before it existed."""
     spec = config.get("replay") or {}
     unknown = set(spec) - {"stratify_by", "stratify_min_samples"}
     if unknown:
         raise KeyError(f"replay: unknown key(s) {sorted(unknown)}")
     demos = config["training"].get("demos") or {}
+    self_demos = config["training"].get("self_demos") or {}
+    reward_fn, n_materials = reward_recomputation(config)
+    upgrade = None
+    if reward_fn is not None:            # older episodes (fewer materials) get the derived fields
+        from functools import partial
+        from ..env.two_device import reward_formula as rf
+        action_slice = None
+        if observation_names:
+            term = (config["env"].get("reward_formula") or {}).get("action_term", rf.DEFAULT_ACTION_TERM)
+            action_slice = rf.action_slice_from_names(observation_names, replay.action_dim, term)
+        upgrade = partial(rf.upgrade_materials, action_slice=action_slice)
     replay.configure(stratify_by=spec.get("stratify_by"),
                      stratify_min_samples=int(spec.get("stratify_min_samples", 20_000)),
-                     demo_fraction=float(demos.get("fraction", 0.0)) if demos.get("dir") else 0.0)
+                     demo_fraction=float(demos.get("fraction", 0.0)) if demos.get("dir") else 0.0,
+                     reward_fn=reward_fn, n_materials=n_materials,
+                     self_demo_capacity=(int(self_demos["capacity"]) if self_demos.get("enabled")
+                                         and self_demos.get("capacity") is not None else None),
+                     materials_upgrade=upgrade)
 
 
 def start_run(config: Mapping[str, Any], env, run_dir: str | Path, *,
@@ -105,7 +135,7 @@ def start_run(config: Mapping[str, Any], env, run_dir: str | Path, *,
     if replay.observation_dim != observation_dim:
         raise ValueError(f"Replay observations are {replay.observation_dim}-D but the env "
                          f"gives {observation_dim}-D; the observation config changed")
-    configure_replay(replay, config)
+    configure_replay(replay, config, observation_names=list(getattr(env, "observation_names", []) or []))
 
     (run_dir / "config.yaml").write_text(yaml.safe_dump(dict(config), sort_keys=False))
     if isinstance(env, EnvPool):

@@ -35,6 +35,7 @@ class AuxHeadSpec:
     gradient: str = "shared"
     output: str = "identity"
     hidden: Optional[Tuple[int, ...]] = None   # default: [mlp_dim, mlp_dim]
+    target_scale: float = 1.0                  # the head predicts label / target_scale (e.g. clearance in cm)
 
     def __post_init__(self) -> None:
         if self.loss not in LOSSES:
@@ -45,6 +46,8 @@ class AuxHeadSpec:
             raise ValueError(f"aux head {self.name}: output must be one of {list(OUTPUTS)}")
         if self.weight < 0:
             raise ValueError(f"aux head {self.name}: weight must be >= 0")
+        if self.target_scale <= 0:
+            raise ValueError(f"aux head {self.name}: target_scale must be > 0")
 
     @classmethod
     def from_config(cls, entry: Mapping[str, Any]) -> "AuxHeadSpec":
@@ -76,5 +79,6 @@ def build_heads(latent_dim: int, mlp_dim: int, specs: Sequence[AuxHeadSpec]) -> 
 
 def head_loss(spec: AuxHeadSpec, prediction: torch.Tensor,
               target: torch.Tensor) -> torch.Tensor:
-    """Elementwise loss, shape like ``prediction`` (horizon, batch, 1)."""
-    return LOSSES[spec.loss](prediction, target)
+    """Elementwise loss, shape like ``prediction`` (horizon, batch, 1); the target in the head's
+    units (``label / target_scale``)."""
+    return LOSSES[spec.loss](prediction, target / float(spec.target_scale))

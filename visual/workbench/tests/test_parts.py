@@ -189,8 +189,8 @@ class FakeScene:
         self.splines.append(h)
         return h
 
-    def add_icosphere(self, name, radius, color, cast_shadow):
-        h = FakeHandle(name=name, radius=radius, color=color, visible=True, position=None)
+    def add_icosphere(self, name, radius, color, cast_shadow, position=None, visible=True, opacity=None):
+        h = FakeHandle(name=name, radius=radius, color=color, visible=visible, position=position)
         self.spheres.append(h)
         return h
 
@@ -331,6 +331,41 @@ def test_body_only_around_the_biro_phantom():
     moved = {k: v + [0, 0, 40.0] for k, v in _branches(VESSELS / "rebuilt_cut.json").items()}
     assert not fits(dataclasses.replace(make_info(), centerlines=moved))
     assert not fits(make_info())
+
+
+def test_junction_map_has_the_six_route_junctions():
+    from parts.body import REFERENCE, _branches
+    from parts.junctions import JUNCTIONS, junction_points
+    points = junction_points()
+    assert [name for name, _ in points] == [name for _, name in JUNCTIONS] and len(points) == 6
+    branches = _branches(REFERENCE)
+    aorta = branches["aorta"]
+    for (branch, _), (_, p) in zip(JUNCTIONS[:3], points[:3]):            # off the aorta: at the mouth,
+        assert np.min(np.linalg.norm(branches[branch] - p, axis=1)) < 1.0     # on the branch,
+        assert np.min(np.linalg.norm(aorta - p, axis=1)) > 8.0                # out of the aorta's middle
+    for (branch, _), (_, p) in zip(JUNCTIONS[3:], points[3:]):            # the others: the branch's start
+        assert np.allclose(p, branches[branch][0])
+    assert np.allclose(points[3][1], branches["bct"][-1])                  # the trunk's end
+
+
+def test_junction_layer_green_balls_only_on_the_phantom():
+    import dataclasses
+    from parts.body import VESSELS, _branches
+    from parts.junctions import JUNCTION_COLOR, JunctionLayer, junction_points
+    from parts.scene import MM
+    from parts.xray import visible_in_xray
+    server = type("S", (), {"scene": FakeScene()})()
+    layer = JunctionLayer(server)
+    layer.set_scene(dataclasses.replace(make_info(), centerlines=_branches(VESSELS / "rebuilt_cut.json")))
+    balls = server.scene.live("spheres")
+    assert len(balls) == 6 and all(b.color == JUNCTION_COLOR and b.visible for b in balls)
+    assert np.allclose(balls[0].position, junction_points()[0][1] * MM)
+    layer.set_visible(False)
+    assert not any(b.visible for b in balls)
+    layer.set_scene(make_info())                                             # another vessel: none
+    assert server.scene.live("spheres") == [] and not layer.shown
+    assert visible_in_xray("junctions", contrast=False, policy_marks=True) is True     # it is in the observation
+    assert visible_in_xray("junctions", contrast=True, policy_marks=False) is False
 
 
 def test_body_layer_draws_its_inner_side_and_follows_the_vessel():
@@ -540,6 +575,29 @@ def test_workbench_panel_switches_language_and_keeps_settings(tmp_path):
         bench.server.stop()
 
 
+def test_auto_next_is_off_unless_asked_and_survives_a_rebuild(tmp_path):
+    """User 2026-11-13: an episode stops on its last frame; starting the next by itself is the
+    checkbox (or ``--auto-next``), not the default."""
+    from workbench import Workbench
+
+    menu = policy_menu(2, [], lambda p: None)
+    bench = Workbench(None, menu=menu, initial_policy="不动", port=_free_port(), record_dir=tmp_path,
+                      seed=7, live=True, lang="en")
+    try:
+        assert bench.auto_next.value is False
+        bench.auto_next.value = True                     # the user's tick is kept across a rebuild
+        bench._rebuild_gui()
+        assert bench.auto_next.value is True
+    finally:
+        bench.server.stop()
+    bench = Workbench(None, menu=menu, initial_policy="不动", port=_free_port(), record_dir=tmp_path,
+                      seed=7, live=True, lang="en", auto_next=True)
+    try:
+        assert bench.auto_next.value is True
+    finally:
+        bench.server.stop()
+
+
 def test_workbench_environment_folder_and_parameter_edits(tmp_path):
     pytest.importorskip("guidewire_rl")
     from guidewire_rl.config import load_config
@@ -623,7 +681,7 @@ def test_keyboard_keys_drive_each_instrument():
 
 
 def test_scripted_policy_wraps_a_controller():
-    from parts.scripted import ScriptedPolicy, staged_factory
+    from parts.scripted import LABEL, LABEL_ROUND1, MODULES, ScriptedPolicy, staged_factories
 
     class Controller:
         stage, substage, tries, last_extra = "wire", "probe", 2, {"d": 1.5, "skip": [1]}
@@ -639,7 +697,11 @@ def test_scripted_policy_wraps_a_controller():
     policy.reset()
     assert ctl.reset_with == "env" and policy.act(np.zeros(3), first_step=True).tolist() == pytest.approx([0.5, 0, 0.1, 0])
     assert policy.debug() == {"stage": "wire:probe", "tries": 2, "d": 1.5}
-    assert staged_factory(type("Source", (), {"action_dim": 2})()) is None       # one instrument: not listed
+    assert staged_factories(type("Source", (), {"action_dim": 2})()) == {}       # one instrument: not listed
+    two = staged_factories(type("Source", (), {"action_dim": 4, "env": "env"})())
+    assert set(two) == {LABEL, LABEL_ROUND1} and LABEL != LABEL_ROUND1          # both versions, apart
+    assert MODULES[LABEL_ROUND1].endswith("script_round1") and MODULES[LABEL].endswith(".script")
+    assert two[LABEL_ROUND1]().label == LABEL_ROUND1
 
 
 def test_keyboard_server_and_script():
@@ -843,8 +905,8 @@ def test_phantoms_and_settings_rebuild_the_configs(tmp_path):
     from parts.environments import (DEFAULT_PHANTOM, DEFAULT_SETTING, SETTING_TEXT, build_config, find_setting,
                                     friction_of, locate, phantoms, settings)
     P, S = phantoms(), settings()
-    assert [p.key for p in P] == ["rebuilt_cut", "spheres_cut", "wilson", "rebuilt", "spheres"]
-    assert all(p.kind == "sim" for p in P)
+    assert [p.key for p in P] == ["rebuilt_cut", "spheres_cut", "wilson", "rebuilt", "spheres", "bench"]
+    assert [p.kind for p in P] == ["sim"] * 5 + ["bench"]
     by_key = {s.key: s for s in S}
     assert {"phantom_g13", "phantom_real_mass", "two_devices_round1"} <= set(by_key)
     folded = {"phantom_friction", "phantom_root", "phantom_all_vessels"}  # differ only in friction / vessel
@@ -891,6 +953,17 @@ def test_shape_source_draws_a_vessel_without_a_simulator():
 
 
 # ------------------------------------------------------------- parameters --
+def test_a_word_for_a_parameter_is_kept_and_compared_as_it_is():
+    """``image_rot_zx: per_target`` (the C-arm angle chosen per target) is not two numbers."""
+    from parts.parameters import changed, find, is_number, read
+    carm = find("carm")
+    assert is_number(carm, [20.0, 5.0]) and not is_number(carm, "per_target")
+    config = {"env": {"scene": {"fluoroscopy": {"image_rot_zx": "per_target"}}}}
+    base = read(config)
+    assert base["carm"] == "per_target" and changed(base, dict(base)) == []
+    assert changed(base, dict(base, carm=[20.0, 5.0])) == ["carm"]
+
+
 def test_parameter_defaults_are_the_class_defaults():
     import inspect
     angled = pytest.importorskip("eve.intervention.instrument.angled")
@@ -925,3 +998,116 @@ def test_parameters_read_apply_and_keep_the_force_label_in_step():
     base = P.read(g13)
     assert base["alarm"] == 0.5 and base["density"] == 2.1e-5           # not in the YAML: class defaults
     assert P.apply(g13, base)["env"]["labels"][0]["expected_substeps"] == 22
+
+
+# --------------------------------------------------------- instrument bench --
+def test_with_devices_swaps_in_a_vessel_and_adds_or_removes_on_the_bench():
+    pytest.importorskip("guidewire_rl")
+    from parts.environments import NO_CATHETER, build_config, find_setting, phantoms, settings, with_devices
+    P, S = {p.key: p for p in phantoms()}, settings()
+    two, one = find_setting("two_devices_ica", S), find_setting("phantom_g13", S)
+    types = lambda c: [s["type"] for s in c["env"]["scene"]["instruments"]]
+    vessel, bench = P["rebuilt_cut"], P["bench"]
+    config = build_config(vessel, two)
+    assert types(with_devices(config, vessel, "glidewire_stiff", "accuvu_omni_flush")) == [
+        "GlidewireStiff", "AccuVuOmniFlush"]
+    assert types(with_devices(config, vessel, None, NO_CATHETER)) == types(config)   # a task keeps its count
+    assert types(with_devices(build_config(vessel, one), vessel, None, "cordis_sidewinder2")) == ["Angled"]
+    assert types(with_devices(build_config(bench, one), bench, None, "cordis_sidewinder2")) == [
+        "Angled", "CordisSidewinder2"]                                      # the bench adds one
+    assert types(with_devices(build_config(bench, two), bench, "glidewire_stiff", NO_CATHETER)) == ["GlidewireStiff"]
+
+
+def test_through_demo_goes_out_through_and_back():
+    from parts.bench import ThroughDemo
+    limits = np.array([[40.0, np.pi], [25.0, np.pi / 2]])
+    demo = ThroughDemo(limits, head_mm=114.2, step_seconds=1 / 7.5, hold_steps=3)
+    lengths, seen, most = np.zeros(2), [], 0.0
+    for step in range(300):
+        action = demo.act(np.r_[lengths, 0.0, 0.0], first_step=step == 0)
+        assert np.all(np.abs(action) <= 1.0) and action[1] == action[3] == 0.0    # no turning
+        lengths = lengths + action[[0, 2]] * limits[:, 0] / 7.5
+        seen.append(demo.phase)
+        most = max(most, lengths[0])
+    assert {"out", "through", "hold", "back", "rest"} <= set(seen)
+    assert lengths[1] == pytest.approx(114.2 + 80, abs=0.5)                   # the catheter stays out
+    assert most == pytest.approx(114.2 + 80 + 60, abs=0.5)                    # the wire 60 mm past its tip
+    with pytest.raises(ValueError):
+        ThroughDemo(limits[:1], head_mm=0.0, step_seconds=0.1)
+
+
+def test_bench_scene_centre_and_grid_only_on_the_bench():
+    from parts.bench import BENCH_KEY, bench_scene_info
+    from parts.scene import BenchGridLayer, camera_pose, scene_center_mm
+    info = bench_scene_info([], np.array([[40.0, 3.14], [25.0, 1.57]]), 1 / 7.5, "bench")
+    assert info.vessel_key == BENCH_KEY and info.action_high.tolist() == pytest.approx([40, 3.14, 25, 1.57])
+    assert scene_center_mm(info) == pytest.approx([125.0, 50.0, 0.0])
+    position, look_at, up = camera_pose("fluoro", info)
+    assert position[2] > look_at[2] and up == pytest.approx([0, 1, 0])      # looks down at the x-y plane
+
+    class Scene:
+        def __init__(self):
+            self.grids = []
+
+        def add_grid(self, name, **kw):
+            handle = type("H", (), {"remove": lambda s: None})()
+            self.grids.append((name, kw))
+            return handle
+
+    server = type("S", (), {})()
+    server.scene = Scene()
+    layer = BenchGridLayer(server)
+    layer.set_scene(info)
+    other = bench_scene_info([], np.zeros((1, 2)), 0.1)
+    other.vessel_key = "phantom.obj"
+    layer.set_scene(other)
+    assert len(server.scene.grids) == 1 and server.scene.grids[0][1]["plane"] == "xy"
+
+
+def test_workbench_device_menus(tmp_path):
+    pytest.importorskip("guidewire_rl")
+    from parts.environments import phantoms, settings
+    from workbench import Workbench
+
+    bench = Workbench(None, menu=policy_menu(4, [], lambda p: None), initial_policy="不动", port=_free_port(),
+                      record_dir=tmp_path, seed=1, live=True, lang="en", phantom_list=phantoms(),
+                      setting_list=settings(), phantom_key="bench", setting_key="two_devices_ica", friction=0.1)
+    try:
+        english = _panel_text(bench.server)
+        assert "Guidewire" in english and "Catheter" in english
+        assert "Friction (instruments on the wall)" not in english             # no wall on the bench
+        assert [t for t in english if has_cjk(t)] == [tr("switch_to", "en")]
+        assert "no catheter" in bench._device_keys["catheter"]
+        bench._ask_device("catheter", "accuvu_omni_flush")
+        assert bench.devices["catheter"] == "accuvu_omni_flush"
+        assert bench.pending_env == ("bench", "two_devices_ica", None)
+        bench.phantom_key, bench.setting_key = "rebuilt_cut", "phantom_g13"     # a vessel, guidewire only
+        bench._rebuild_gui()
+        assert set(bench._device_keys) == {"wire"} and "Friction (instruments on the wall)" in _panel_text(bench.server)
+    finally:
+        bench.server.stop()
+
+
+@pytest.mark.sofa
+def test_bench_source_runs_the_demo():
+    pytest.importorskip("Sofa")
+    from parts.bench import DEMO_LABEL, BenchSource, bench_menu
+    from parts.environments import build_config, find_setting, phantoms, settings, with_devices
+
+    bench = next(p for p in phantoms() if p.key == "bench")
+    config = with_devices(build_config(bench, find_setting("two_devices_ica", settings())), bench,
+                          "glidewire_stiff", "cordis_sidewinder2")
+    source = BenchSource(config, description="bench")
+    try:
+        menu = bench_menu(source)
+        assert next(iter(menu)) == DEMO_LABEL and source.action_dim == 4
+        source.set_policy(menu[DEMO_LABEL]())
+        first = source.reset(seed=0)
+        info = source.scene_info()
+        assert [i.name for i in info.instruments] == ["guidewire", "catheter"] and len(first.obs) == 4
+        frames = [source.step() for _ in range(40)]
+        assert not any(f.done for f in frames) and frames[-1].inserted_mm[1] > 100
+        assert frames[-1].extras["demo_phase"] in ("out", "through")
+        assert np.all(np.isfinite(frames[-1].wire_mm)) and len(frames[-1].wire_mm) > len(first.wire_mm)
+    finally:
+        source.close()

@@ -102,6 +102,23 @@ def test_route_target_window_and_split(route):
     back = tracking3d_to_vessel_cs(train.coordinates3d, fluoro.image_rot_zx, fluoro.image_center)
     np.testing.assert_allclose(back, train.coordinates_vessel, atol=1e-3)
     assert train.depth_mm in train.candidate_depths
+    # jitter_mm: a band around each train candidate; the same seed without it is unchanged; eval never moves
+    band = RouteWindowTarget(tree, fluoro, split="train", jitter_mm=0.5)
+    depths = []
+    for seed in range(40):
+        band.reset(seed=seed)
+        train.reset(seed=seed)
+        assert abs(band.depth_mm - train.depth_mm) <= 0.5
+        assert r.depth(band.coordinates_vessel, "rcca") == pytest.approx(band.depth_mm, abs=1e-4)
+        depths.append(band.depth_mm)
+    assert len(set(depths)) == 40 and all(abs(d - e) >= 0.5 for d in depths for e in evaluate.candidate_depths)
+    still = RouteWindowTarget(tree, fluoro, split="eval", jitter_mm=0.5)
+    for seed in range(10):
+        still.reset(seed=seed)
+        evaluate.reset(seed=seed)
+        assert still.depth_mm == evaluate.depth_mm
+    with pytest.raises(ValueError):
+        RouteWindowTarget(tree, fluoro, jitter_mm=-1.0)
 
 
 # ------------------------------------------------------------------------- referee ----
@@ -157,10 +174,15 @@ def test_referee_falls_back(referee):
     referee.state.phase = 2
     out = run(referee, [made_state(aorta_pos_c=0.0, d=-5.0, depth_bct_c=8.5)] * 2)
     assert out[-1].phase == 3
-    # P4 -> P2 when the catheter leaves the opening, counted as dislodged once
+    # P4 -> P2 when the catheter leaves the opening; dislodged counts once the catheter, seated
+    # 8 mm in before, comes all the way out of the mouth (< 0 mm), not at 3 mm (round two)
     referee.state.phase = 4
+    run(referee, [made_state(aorta_pos_c=0.0, d=30.0, depth_bct_c=20.0, depth_rcca_w=40.0)] * 2)
     out = run(referee, [made_state(aorta_pos_c=0.0, d=30.0, depth_bct_c=3.0, depth_rcca_w=40.0)] * 2)
-    assert out[-1].phase == 2 and out[-1].events["dislodged"] == 1 and out[0].events["dislodged"] == 0
+    assert out[-1].phase == 2 and all(s.events["dislodged"] == 0 for s in out)
+    out = run(referee, [made_state(aorta_pos_c=0.0, d=30.0, depth_bct_c=x, depth_rcca_w=40.0)
+                        for x in (-1.0, -2.0, 5.0, 9.0, -1.0)])
+    assert [s.events["dislodged"] for s in out] == [1, 0, 0, 0, 1]
     # hysteresis: between 4 and 8 mm into the trunk nothing changes in P2 or P3
     referee.state.phase = 3
     out = run(referee, [made_state(aorta_pos_c=0.0, d=-20.0, depth_bct_c=6.0)] * 3)
@@ -173,8 +195,9 @@ def test_referee_recovers_after_the_catheter_slips_out_with_the_wire_out(referee
     sits 24 mm in again -> P3, the wire is still 15+ mm in the carotid -> P4."""
     referee.state.phase = 4
     up = dict(aorta_pos_c=0.0, d=30.0, depth_rcca_w=40.0, depth_bct_w=100.0)
+    run(referee, [made_state(depth_bct_c=24.0, **up)] * 2)             # seated (arms 'dislodged')
     out = run(referee, [made_state(depth_bct_c=3.0, **up)] * 2)
-    assert out[-1].phase == 2 and out[-1].events["dislodged"] == 1
+    assert out[-1].phase == 2 and out[-1].events["dislodged"] == 0     # 3 mm in is not out
     out = run(referee, [made_state(depth_bct_c=x, **up) for x in (3.0, 5.0, 6.0, 7.0)])
     assert [s.phase for s in out] == [2, 2, 2, 2]            # not P1 (used to drop there for good)
     out = run(referee, [made_state(depth_bct_c=24.0, **up)] * 2)
@@ -192,39 +215,58 @@ def test_referee_recovers_after_the_catheter_slips_out_with_the_wire_out(referee
 
 
 def test_referee_events_count_once(referee):
+    """A wrong vessel counts at 8 mm in and again only after the tip came all the way out
+    (< 0 mm; user decision 2026-11-09): 3 mm in is not out."""
+    from guidewire_rl.env.two_device.phases import EVENT_NAMES
+    assert EVENT_NAMES == ("wrong_vessel", "dislodged", "tier1")
     seq = [made_state(depth_wrong={"lcca": 9.0, "lsa": -30.0, "rsa": -60.0})] * 3 + \
           [made_state(depth_wrong={"lcca": 3.0, "lsa": -30.0, "rsa": -60.0}),
+           made_state(depth_wrong={"lcca": 9.0, "lsa": -30.0, "rsa": -60.0}),
+           made_state(depth_wrong={"lcca": -1.0, "lsa": -30.0, "rsa": -60.0}),
            made_state(depth_wrong={"lcca": 9.0, "lsa": -30.0, "rsa": -60.0})]
     out = run(referee, seq)
-    assert [s.events["wrong_vessel"] for s in out] == [1, 0, 0, 0, 1]
+    assert [s.events["wrong_vessel"] for s in out] == [1, 0, 0, 0, 0, 0, 1]
     assert out[-1].event_totals["wrong_vessel"] == 2
-    out = run(referee, [made_state(d=101.0)] * 2 + [made_state(d=80.0), made_state(d=105.0)])
-    assert [s.events["wire_lead_arch"] for s in out] == [1, 0, 0, 1]
-    out = run(referee, [made_state(depth_rcca_w=65.0)] * 2)
-    assert [s.events["wire_past_fork"] for s in out] == [1, 0]
-    referee.report("bare_advance")
-    referee.report("bare_advance")
-    assert referee.pending_events["bare_advance"] == 2
+    with pytest.raises(KeyError):
+        referee.report("bare_advance")                     # no such event any more
 
 
-def test_referee_success_and_failures(referee):
+def test_referee_two_tiers_and_failures(referee):
+    """First tier: wire in the target ball, catheter >= 60 mm into the carotid and not past the
+    split, 8 steps: +1 once (an event), the episode goes on. Second tier: wire in the ball, catheter
+    >= 5 mm past the split, 8 steps: success. No lead condition. The only hard failure: a tip
+    outside the tubes (user decisions 2026-11-09)."""
     referee.state.phase = 4
-    platform = dict(aorta_pos_c=0.0, d=30.0, depth_bct_c=60.0, depth_rcca_c=20.0,
-                    depth_rcca_w=50.0, dist_to_target_w=3.0)
-    out = run(referee, [made_state(**platform)] * 7)
-    assert not out[-1].success and out[-1].platform_steps == 7
-    out = run(referee, [made_state(**platform)])
-    assert out[-1].success
-    bad = dict(platform, d=50.0)                                # wire too far ahead
-    assert not run(referee, [made_state(**bad)])[-1].success
+    tier1 = dict(aorta_pos_c=0.0, d=30.0, depth_bct_c=60.0, depth_rcca_c=65.0, depth_ica_c=-20.0,
+                 depth_rcca_w=110.0, depth_ica_w=38.0, dist_to_target_w=3.0)
+    out = run(referee, [made_state(**tier1)] * 7)
+    assert not out[-1].tier1_done and out[-1].tier1_steps == 7 and out[-1].events["tier1"] == 0
+    out = run(referee, [made_state(**tier1)])
+    assert out[-1].tier1_done and out[-1].events["tier1"] == 1 and not out[-1].success
+    out = run(referee, [made_state(**tier1)] * 3)
+    assert all(s.events["tier1"] == 0 and s.tier1_done for s in out)       # paid once
+    shallow = dict(tier1, depth_rcca_c=55.0)                              # not deep enough: no tier
+    referee.state = made_state(phase=4)
+    assert run(referee, [made_state(**shallow)] * 9)[-1].tier1_steps == 0
+    tier2 = dict(tier1, depth_rcca_c=96.0, depth_ica_c=6.0)
+    out = run(referee, [made_state(**tier2)] * 8)
+    assert [s.success for s in out] == [False] * 7 + [True] and out[-1].platform_steps == 8
+    far_ahead = dict(tier2, d=50.0)                                       # the lead is no condition
+    referee.state = made_state(phase=4)
+    assert run(referee, [made_state(**far_ahead)] * 8)[-1].success
+    short_lead = dict(tier2, d=12.0)
+    referee.state = made_state(phase=4)
+    assert run(referee, [made_state(**short_lead)] * 8)[-1].success
+    not_in_ica = dict(tier2, depth_ica_c=4.0)
+    referee.state = made_state(phase=4)
+    assert not run(referee, [made_state(**not_in_ica)] * 9)[-1].success
     out = run(referee, [made_state(clearance_w=-7.0)])
     assert out[-1].hard_failure and out[-1].failure_reason == "outside_wire"
     out = run(referee, [made_state(clearance_c=-5.0)])        # within the tubes' 6 mm margin
     assert not out[-1].hard_failure
-    out = run(referee, [made_state(d=0.2, L_wire=50.2, L_cath=50.0)])
-    assert out[-1].failure_reason == "same_length"
-    out = run(referee, [made_state(d=0.0, L_wire=0.0, L_cath=0.0)])   # the start is not a failure
+    out = run(referee, [made_state(d=0.2, L_wire=50.2, L_cath=50.0)])   # same length: no failure
     assert not out[-1].hard_failure
+    assert out[-1].info()["tier1"] is False and "progress_ratio" in out[-1].info()
 
 
 # ------------------------------------------------------------------------- rewards ----
@@ -313,16 +355,19 @@ def arch_state(detector, s_wire, s_cath, phase):
 
 
 def test_arch_ruler_meets_the_plain_one_at_the_hook_point(arch_referee):
+    """The hook-point ruler is the reward formula's switched-off reserve (``hook_paths``); the
+    progress rewards use the plain path the whole way (``progress_paths``)."""
     route, H = arch_referee.route, arch_referee.route.s_O + 30.0
-    at_hook = arch_state(arch_referee, H, H, phase=0).progress_paths()
+    at_hook = arch_state(arch_referee, H, H, phase=0).hook_paths()
     plain = arch_state(arch_referee, H, H, phase=1).progress_paths()
     np.testing.assert_allclose(at_hook, plain, atol=1e-6)
-    # before H: what is left to H plus the fixed rest; past H in P0: flat
-    before = arch_state(arch_referee, H - 25.0, H - 40.0, phase=0).progress_paths()
+    np.testing.assert_allclose(arch_state(arch_referee, H, H, phase=0).progress_paths(), plain)
+    # before H: what is left to H plus the fixed rest; past H: flat
+    before = arch_state(arch_referee, H - 25.0, H - 40.0, phase=0).hook_paths()
     np.testing.assert_allclose(before, [25.0 + arch_referee.hook_to_target,
                                         40.0 + arch_referee.hook_to_target,
                                         40.0 + arch_referee.hook_to_F], atol=1e-6)
-    past = arch_state(arch_referee, H + 30.0, H + 10.0, phase=0).progress_paths()
+    past = arch_state(arch_referee, H + 30.0, H + 10.0, phase=0).hook_paths()
     np.testing.assert_allclose(past, at_hook, atol=1e-6)
     # a wrong vessel is not progress in P0: deeper into the left subclavian is further from H
     g = route.graph
@@ -330,19 +375,86 @@ def test_arch_ruler_meets_the_plain_one_at_the_hook_point(arch_referee):
     assert arch_referee._to_hook(lsa[1]) > arch_referee._to_hook(lsa[0])
 
 
-def test_arch_ruler_rewards_reaching_the_hook_point_and_does_not_jump_into_P1(arch_referee):
-    from guidewire_rl.env.two_device.rewards import CatheterToF, LeadingTipProgress
+def hook_walk(detector, locations):
+    """Referee states along a walk of both tips together (vessel geometry real), with the arch
+    ruler's per-episode switch carried the way ``PhaseDetector._measure`` carries it."""
+    route = detector.route
+    done, states = False, []
+    for loc in locations:
+        done = done or detector.hook_reached(loc)
+        states.append(made_state(
+            phase=0, path_to_target_w=route.path_to_target(None, loc),
+            path_to_target_c=route.path_to_target(None, loc), path_to_F_c=route.path_to_F(None, loc),
+            to_hook_w=detector._to_hook(loc), to_hook_c=detector._to_hook(loc),
+            hook_done_w=done, hook_done_c=done,
+            hook_to_target=detector.hook_to_target, hook_to_F=detector.hook_to_F))
+    return states
+
+
+def test_arch_ruler_switches_to_the_plain_one_after_the_hook_point_or_the_trunk(arch_referee):
+    """Fix of 2026-11-10: up the trunk and the carotid the arch ruler is the plain path (before the
+    fix it measured the way back to H there, so going up counted as going back)."""
+    route, g = arch_referee.route, arch_referee.route.graph
+    H = route.s_O + 30.0
+    mouth = g.mouth_arc[g.index["bct"]]
+    aorta = lambda x: route.locate(g.point("aorta", x))
+    trunk = lambda x: route.locate(g.point("bct", mouth + x))
+    carotid = lambda x: route.locate(route.point_at(route.s_rcca + x))
+    # the hook manoeuvre: up the aorta to H, pulled back to O, into the trunk, up the carotid
+    walk = ([aorta(x) for x in np.arange(route.s_O - 20.0, H + 1e-6, 2.0)]
+            + [aorta(x) for x in np.arange(H - 2.0, route.s_O - 1e-6, -2.0)]
+            + [trunk(x) for x in (2.0, 10.0, 30.0)] + [carotid(x) for x in (20.0, 60.0)])
+    states = hook_walk(arch_referee, walk)
+    hooked = np.array([s.hook_paths() for s in states])
+    plain = np.array([s.progress_paths() for s in states])
+    at_H = int(np.argmax([s.hook_done_c for s in states]))
+    assert walk[at_H].arc == pytest.approx(H) and not states[at_H - 1].hook_done_c
+    assert np.all(np.diff(hooked[: at_H + 1, 1]) < 0)                # paid for getting to H
+    np.testing.assert_allclose(hooked[at_H:], plain[at_H:], atol=1e-6)  # from H on: the plain path
+    trunk_on = [i for i, loc in enumerate(walk) if loc.branch != "aorta"]
+    assert np.all(np.diff(hooked[trunk_on, 1]) < 0)                  # up the trunk is progress
+    # straight into the trunk without H: one jump at the mouth, the plain path after it
+    direct = hook_walk(arch_referee, [aorta(route.s_O - 20.0), aorta(route.s_O), trunk(2.0), trunk(20.0)])
+    d_hooked = np.array([s.hook_paths()[1] for s in direct])
+    d_plain = np.array([s.progress_paths()[1] for s in direct])
+    assert d_hooked[1] > d_plain[1] and d_hooked[2] == pytest.approx(d_plain[2])
+    assert np.diff(d_hooked)[2] == pytest.approx(np.diff(d_plain)[2])
+    # a wrong vessel before O keeps the arch ruler: deeper is further from H
+    lcca = [route.locate(g.point("lcca", g.mouth_arc[g.index["lcca"]] + x)) for x in (5.0, 15.0)]
+    wrong = hook_walk(arch_referee, lcca)
+    assert not wrong[-1].hook_done_c and wrong[1].hook_paths()[1] > wrong[0].hook_paths()[1]
+
+
+def test_arch_ruler_reserve_pays_reaching_the_hook_point_and_is_flat_past_it(arch_referee):
+    """With ``arch_ruler`` on, the formula's progress terms follow the hook-point ruler: the
+    catheter 2 mm closer to H each step earns, past H nothing (flat), no jump anywhere."""
+    from guidewire_rl.env.two_device import reward_formula as rf
     H = arch_referee.route.s_O + 30.0
     cath = np.arange(H - 20.0, H + 6.0, 2.0)            # catheter pushed past O to H and on
-    states = [arch_state(arch_referee, x + 15.0, x, phase=0 if x < H else 1) for x in cath]
-    r_cath = rewards_of(CatheterToF(FakeReferee(states[0]), 0.003), states)
-    r_lead = rewards_of(LeadingTipProgress(FakeReferee(states[0]), 0.01), states)
-    switch = int(np.argmax(cath >= H)) - 1              # reward index of the step into P1
-    np.testing.assert_allclose(r_cath[:switch + 1], 0.003 * 2.0, atol=1e-6)   # 2 mm closer to H each step
-    assert np.all(r_cath[switch + 1:] < 0)              # P1: deeper than H is away from F
-    wire_left = np.maximum(H - (cath + 15.0), 0.0)        # wire's way left to H
-    np.testing.assert_allclose(r_lead[:switch + 1], 0.01 * -np.diff(wire_left)[:switch + 1], atol=1e-6)
-    assert abs(r_lead[switch]) <= 0.01 * 2.0 + 1e-6      # no jump at P0 -> P1
+    states = [arch_state(arch_referee, x + 15.0, x, phase=0) for x in cath]
+    referee = FakeReferee(states[0])
+    plain = rf.TwoDeviceFormula(referee, progress=0.01, follow=0.003)
+    reserve = rf.TwoDeviceFormula(referee, progress=0.01, follow=0.003, arch_ruler=True)
+    plain.reset()
+    reserve.reset()
+    hooked, flat = [], []
+    for state in states[1:]:
+        referee.state = state
+        r, m = reserve.step({"distal_force": 0.0, "catheter_tip_force": 0.0})
+        hooked.append(m[rf.INDEX["hook_follow_mm"]])
+        flat.append(m[rf.INDEX["follow_mm"]])
+        r2, m2 = plain.step({"distal_force": 0.0, "catheter_tip_force": 0.0})
+        np.testing.assert_allclose(m, m2)                # the same materials, whichever is on
+        assert r == pytest.approx(0.003 * m[rf.INDEX["hook_follow_mm"]] + 0.01 * m[rf.INDEX["hook_progress_mm"]]
+                                  - 0.002, abs=1e-6)
+        assert r2 == pytest.approx(0.003 * m[rf.INDEX["follow_mm"]] + 0.01 * m[rf.INDEX["progress_mm"]]
+                                   - 0.002, abs=1e-6)
+    hooked, flat = np.asarray(hooked), np.asarray(flat)
+    before = cath[1:] <= H
+    np.testing.assert_allclose(hooked[before], 2.0, atol=1e-6)    # 2 mm closer to H each step
+    np.testing.assert_allclose(hooked[~before], 0.0, atol=1e-6)   # past H: flat
+    assert np.all(flat < 0)                                        # the plain ruler: past O is away from F
+    assert np.max(np.abs(hooked)) <= 2.0 + 1e-6                   # no jump
 
 
 def test_simulation_error_steps_pay_nothing_and_move_no_potential():
@@ -374,8 +486,7 @@ def test_penalties_and_outcome():
     # ... but the plain P2 window while the wire tip is still behind the mouth or inside the catheter
     assert window.outside_mm(made_state(phase=2, d=30.0, depth_bct_w=-5.0)) == 60.0
     assert window.outside_mm(made_state(phase=2, d=-20.0, depth_bct_w=5.0)) == 10.0
-    events = {"wrong_vessel": 2, "dislodged": 1, "bare_advance": 0, "wire_lead_arch": 0,
-              "wire_past_fork": 0}
+    events = {"wrong_vessel": 2, "dislodged": 1, "tier1": 0}
     r = rewards_of(EventPenalty(FakeReferee(made_state())), [made_state(), made_state(events=events)])
     assert r[0] == pytest.approx(-0.2)
     r = rewards_of(OutcomeReward(FakeReferee(made_state())),
@@ -751,14 +862,16 @@ def test_config_follows_the_plan():
 @pytest.mark.upstream
 def test_every_part_resolves():
     from guidewire_rl.env import registry
-    names = {"monitor": ["PhaseDetector", "NominalAdvisor", "WallDistance"], "action": ["TwoDeviceGuarded"],
+    names = {"monitor": ["PhaseDetector", "NominalAdvisor", "WallDistance", "TaskBox2D"],
+             "action": ["TwoDeviceGuarded", "TwoDeviceLimits"],
              "target": ["RouteWindowTarget"], "instrument": ["HookCatheter"],
              "observation": ["InstrumentTip2D", "InstrumentShape2D", "TaskTarget2D", "JunctionMap2D",
                              "PhaseOneHot", "InsertionDiff", "InsertionLengthsNormalized",
-                             "ScriptSuggestion", "FrameHistory"],
+                             "ScriptSuggestion", "FrameHistory", "TierFlag"],
              "observation_wrapper": ["TipNoise2D", "Normalize2DTask"],
              "reward": ["LeadingTipProgress", "CatheterToF", "HookPrepPotential", "PhasePotential",
-                        "WindowPenalty", "EventPenalty", "ShieldPenalty", "StepPenalty", "OutcomeReward"],
+                        "WindowPenalty", "EventPenalty", "ShieldPenalty", "StepPenalty", "OutcomeReward",
+                        "ZeroReward", "TwoDeviceFormula"],
              "terminal": ["PlatformReached", "HardFailure"], "truncation": ["PhaseCutoff", "WallBreach"],
              "info": ["PhaseInfo", "ShieldInfo", "WallInfo"],
              "label": ["InstrumentTipForce", "CatheterTipForce", "TipClearance"]}
@@ -869,3 +982,18 @@ def test_scripted_push_reaches_the_hook_phase(sofa_env):
             break
     assert phases[-1] == 1 and set(phases) == {0, 1}
     assert referee.state.aorta_pos_c >= 30.0
+
+
+def test_override_reaches_a_named_list_entry():
+    """``--set env.monitors.phase_detector.thresholds.target_mm=3`` (the judge's line, stricter in training)."""
+    from guidewire_rl.config import load_config
+    path = WORKSPACE_ROOT / "configs" / "two_devices_ica_dagger.yaml"
+    plain = load_config(path)
+    strict = load_config(path, ["env.monitors.phase_detector.thresholds.target_mm=3.0"])
+    judge = lambda c: next(m for m in c["env"]["monitors"] if m["name"] == "phase_detector")["thresholds"]
+    assert judge(plain)["target_mm"] == 5.0 and judge(strict)["target_mm"] == 3.0
+    assert {k: v for k, v in judge(strict).items() if k != "target_mm"} == \
+           {k: v for k, v in judge(plain).items() if k != "target_mm"}
+    for bad in ("env.monitors.nobody.x=1", "env.monitors.phase_detector.thresholds.nokey=1"):
+        with pytest.raises(KeyError):
+            load_config(path, [bad])

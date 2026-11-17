@@ -25,6 +25,14 @@ start fresh: the policy is handed the episode there.
 A snapshot taken before the wire leaves the catheter (referee phase <= 2) does not depend on the
 episode's target (the scripted prefix does not look at it until then), so such snapshots serve any
 target; ``max_phase`` keeps the library to those by default.
+
+The policy's own start library (user 2026-11-12, work log 14:xx; ``train/start_library.py``): training
+episodes save a snapshot each time they first reach a new progress grid (``EpisodeSnapshots``), the
+trainer keeps them by grid and starts later episodes from them (``GuidewireEnv.reset(options=
+{"snapshot": path})`` -> ``FromSnapshot`` restores that file). No script and no recording: every state
+is one the policy reached itself. Such a state may lie past the point where the wire left the catheter
+and comes from an episode with another target (drawn 35-45 mm past the split): the restored episode
+keeps its own target, and the referee measures the restored state against it (``PhaseDetector.reset``).
 """
 
 from __future__ import annotations
@@ -176,17 +184,24 @@ class FromSnapshot(Start):
     """``env.start``: with probability ``fraction`` the episode starts from a snapshot of ``library``
     (a directory of ``.npz`` written by ``save``; those with referee phase <= ``max_phase``), picked
     with the simulation's seeded generator; otherwise the ordinary opening (``WireFirst``,
-    ``wire_mm``). ``last`` tells which snapshot the current episode started from (None: the opening)."""
+    ``wire_mm``). ``last`` tells which snapshot the current episode started from (None: the opening).
+    ``count_saved_steps`` (user 2026-11-13, work log 2026-11-12 23:27): an episode started from a snapshot
+    keeps the steps its saved state had already taken towards the step limit (``GuidewireEnv.reset``
+    advances the ``MaxSteps`` truncation by the snapshot's ``step``), so it has 800 - that many steps
+    left, as if it had walked there itself; False (the default): a restored episode gets the full limit."""
 
-    def __init__(self, intervention, library: str, fraction: float = 1.0, max_phase: int = 2,
-                 wire_mm: float = 40.0) -> None:
+    def __init__(self, intervention, library: Optional[str] = None, fraction: float = 1.0, max_phase: int = 2,
+                 wire_mm: float = 40.0, count_saved_steps: bool = False) -> None:
         self.intervention = intervention
-        self.library = Path(library)
+        self.library = None if library is None else Path(library)
         self.fraction = float(fraction)
         self.max_phase = int(max_phase)
+        self.count_saved_steps = bool(count_saved_steps)
         self.fallback = WireFirst(intervention, wire_mm=wire_mm)
         self.files: List[Path] = []
-        if self.library.exists():
+        if intervention is not None:                    # set by GuidewireEnv.reset(options={"snapshot": ...})
+            intervention.requested_snapshot = None
+        if self.library is not None and self.library.exists():
             for path in sorted(self.library.glob("*.npz")):
                 meta = load(path)["meta"]
                 if meta.get("phase", 0) <= self.max_phase:
@@ -198,14 +213,59 @@ class FromSnapshot(Start):
     def reset(self, episode_nr: int = 0) -> None:
         self.intervention.snapshot_referee_state = None
         self.last = None
-        rng = self.intervention.simulation._rng               # pylint: disable=protected-access
-        if not self.files or rng.random() >= self.fraction:
-            self.fallback.reset(episode_nr)
-            return
-        path = self.files[int(rng.integers(len(self.files)))]
+        requested = getattr(self.intervention, "requested_snapshot", None)
+        self.intervention.requested_snapshot = None
+        if requested is not None:                       # the trainer chose the start (its own library)
+            path = Path(requested)
+        else:
+            rng = self.intervention.simulation._rng           # pylint: disable=protected-access
+            if not self.files or rng.random() >= self.fraction:
+                self.fallback.reset(episode_nr)
+                return
+            path = self.files[int(rng.integers(len(self.files)))]
         snap = load(path)
         self.intervention.reset_instruments()
         report = restore_simulation(self.intervention.simulation, snap)
         self.intervention.snapshot_referee_state = snap["referee"]
         self.intervention.last_action = np.zeros_like(np.asarray(self.intervention.last_action, dtype=np.float64))
         self.last = dict(path=str(path), **snap["meta"], **report)
+
+
+class EpisodeSnapshots:
+    """Saves a snapshot each time a training episode first reaches a new progress grid (``bins`` equal
+    grids of the progress ratio, grid k = floor(ratio * bins) + 1; the policy's own start library). One
+    per env process: ``begin`` at every reset (``directory`` None = save nothing this episode, e.g. an
+    evaluation), ``after_step`` after every step; it returns what it saved (``path``, ``grid``,
+    ``progress``, ``step``) for the trainer's library, else None. ``capture_fn(env, **meta)`` is
+    ``capture`` (a test may pass another)."""
+
+    def __init__(self, bins: int = 10, capture_fn=None) -> None:
+        self.bins = int(bins)
+        self.capture_fn = capture if capture_fn is None else capture_fn
+        self.directory: Optional[Path] = None
+        self.best_grid = 0
+        self.tag = ""
+        self.steps = 0
+
+    def grid_of(self, ratio: float) -> int:
+        return 0 if ratio <= 0.0 else int(min(self.bins, int(np.floor(ratio * self.bins)) + 1))
+
+    def begin(self, directory: Optional[str], tag: str, start_ratio: float = 0.0) -> None:
+        self.directory = None if directory is None else Path(directory)
+        self.best_grid = self.grid_of(float(start_ratio))
+        self.tag, self.steps = str(tag), 0
+
+    def after_step(self, env, info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        self.steps += 1
+        if self.directory is None or info.get("simulation_error") or info.get("wall_breached"):
+            return None
+        if info.get("is_success") or info.get("hard_failure"):
+            return None                                 # the episode ends here: nothing to start from
+        ratio = float(info.get("progress_ratio", 0.0) or 0.0)
+        grid = self.grid_of(ratio)
+        if grid <= self.best_grid:
+            return None
+        self.best_grid = grid
+        path = self.directory / f"grid_{grid:02d}" / f"{self.tag}_s{self.steps:04d}.npz"
+        save(path, self.capture_fn(env, grid=grid, progress=ratio, step=self.steps, tag=self.tag))
+        return {"path": str(path), "grid": grid, "progress": ratio, "step": self.steps}

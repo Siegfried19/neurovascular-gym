@@ -1,0 +1,69 @@
+# The next stage's first step (todo_list/small_changes_generalization.md): the delivered policy
+# (runs/round2_dagger_v5/checkpoints/step_520000.pt, no teacher) trained on, with the wall friction
+# drawn anew every episode, a drive that does not execute the command exactly, and the training target
+# anywhere in its window. (Named two_devices_ica_friction.yaml until the execution group joined it.)
+#
+# Compared with two_devices_ica_dagger.yaml:
+#   - env.randomize.friction: every episode's friction coefficient is drawn (log-uniform in the range);
+#     nominal_fraction of the episodes keep env.scene.simulation.friction. Why: the delivered policy,
+#     examined at fixed frictions (40 episodes each), completed 36 at 0.1, 35 at 0.2, 32 at 0.05 and
+#     30 at 0.03, the losses at low friction being wall breaches around step 80-100
+#     (agent_log/CURRENT_STATE.md, section 4, item 16). The range 0.01-0.3: a hydrophilic wire is
+#     slicker than 0.1, and 0.5 is beyond what a liquid-filled phantom has (user 2026-11-16).
+#   - env.randomize.execution: every episode a latency of 0-2 control steps (up to 0.27 s), a gain of
+#     0.8-1.2 per channel that stays the same for the episode (user 2026-11-16 late: the latency
+#     smaller; round3_randomized_v2 had 0-4 steps and 0.7-1.3 and stalled on the arch). The gain stands
+#     for slip and radius error only: the user's drive pushes with a rotating wheel and is commanded in
+#     deg/s, and that fixed conversion to mm/s is a calibration for a layer between policy and drive,
+#     not something to randomize over; a larger gain range waits for the robot's numbers, a per-step jitter of up to +-10 % and a
+#     dead band (push up to 1 mm/s, rotation up to 0.1 rad/s) between the command and what the simulator
+#     executes. User 2026-11-16: the robot's output is delayed, e.g. 0.5 s, and differs from the command
+#     by an amount that is constant within an episode and may be set rather large. (Until
+#     round3_randomized_v1 was stopped: latency 0-1 step, gain 0.9-1.1, jitter up to 30 %; at the ends
+#     of those ranges the delivered policy completed 35-36 of 40, as unchanged.)
+#   - env.scene.target.sampling: uniform: a training target is any depth in the window, not one of six
+#     points (+- a band): the same measurement lost 3 of 10 episodes on one exam point.
+#   - env.info: ScenarioInfo added, so every episode's record carries what was drawn.
+#   - evaluation.end_when_stalled: the periodic evaluations end an episode that stands still (200 steps).
+#   - what round2_dagger_v5 passed on its command line, now written here: the noise cap
+#     (model.log_std_max), the training thresholds stricter than the exam's (target_mm 3 against 5,
+#     tier2_cath_past_split 8 against 5), no stop on a stalled success rate.
+# Nothing the policy sees changes (120 values), so the delivered checkpoint resumes as it is.
+# The pass exam does not use this file (its lines are the stricter ones): scripts/evaluate.py with
+# two_devices_ica_dagger.yaml, at one fixed friction with --set env.scene.simulation.friction=<mu>.
+extends: two_devices_ica_dagger.yaml
+
+run:
+  name: two_devices_ica_randomized
+
+env:
+  scene:
+    target: {sampling: uniform, jitter_mm: 0.0}
+  monitors:
+    - {name: phase_detector, type: PhaseDetector, split_branch: v8, catheter_goal_past_split_mm: 5.0,
+       platform_hold_steps: 8,
+       thresholds: {tier1_cath_depth: 60.0, tier2_cath_past_split: 8.0, wrong_in: 8.0, wrong_out: 0.0,
+                    seated: 8.0, unseated: 0.0, target_mm: 3.0}}
+    - {name: wall_distance, type: WallDistance}
+    - {name: task_box, type: TaskBox2D, region: tree}
+  info: [PhaseInfo, ShieldInfo, WallInfo, ForceBlowupInfo, StallInfo, ScenarioInfo]
+  randomize:
+    friction: {range: [0.01, 0.3], log: true, nominal_fraction: 0.3}
+    execution: {delay_steps: [0.0, 2.0], gain: [0.8, 1.2], jitter: [0.0, 0.1],
+                deadband_push_mm_s: [0.0, 1.0], deadband_rot_rad_s: [0.0, 0.1], nominal_fraction: 0.3}
+
+model:
+  log_std_max: -2.3
+
+training:
+  total_steps: 1000000
+  schedule: {stop_patience: 100}
+
+evaluation:
+  interval: 50000
+  background: true
+  max_minutes: 90
+  end_when_stalled: true
+
+logging:
+  wandb: {tags: [round3, two_devices_ica, randomized]}

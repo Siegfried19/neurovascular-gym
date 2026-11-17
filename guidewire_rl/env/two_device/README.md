@@ -1,183 +1,111 @@
 # 两器械任务的环境零件（导丝 + 钩形导管）
 
-第一轮两器械训练（计划 [`todo_list/two_devices_training.md`](../../../todo_list/two_devices_training.md)）用的环境零件。任务：从降主动脉的插入点出发，导丝带着导管过弓；导管推过头臂干口后把钩摆朝上，往回拉钩进头臂干；导丝从导管里出来，经头臂干进右颈总；导管跟进。配置是 [`configs/two_devices_round1.yaml`](../../../configs/two_devices_round1.yaml)，测试是 [`tests/test_two_device_env.py`](../../../tests/test_two_device_env.py)。2026-10-31 写（WP-A），当天按主会话的要求改过一轮（同长保护、硬规则、过弓段的尺子、力限校准、壳的统计）。
+这个文件夹放两器械任务在环境这一边的全部零件：导丝 + lab 的钩形导管，从降主动脉的插入点到右颈内。
+
+- 现在的配置：[`configs/two_devices_ica.yaml`](../../../configs/two_devices_ica.yaml) 和继承它的五份。
+- **这里只讲有哪些零件、怎么接、怎么测。** 为什么这样设计、试过哪些不行，在 [`docs/design.md`](../../../docs/design.md)。
+- 每个文件开头的说明是那个零件最细的描述（比如裁判的五段、两档、事件都写在 `phases.py` 开头），这里不重复。
+- 第一轮（2026-10-31，目标只到右颈总）的观测、奖励、安全壳和当时量的数，在 [`docs/archive/two_device_round1_env.md`](../../../docs/archive/two_device_round1_env.md)，那是这份 README 2026-11-14 以前的原文。
 
 ## 零件一览
 
-| 文件 | 零件（配置里写的名字） | 管什么 |
-| --- | --- | --- |
-| `route.py` | `Route`（内部用，不进配置） | 路线和尺子：沿血管走多远、进某根血管多深、离目标还有多少路 |
-| `phases.py` | `PhaseDetector`（`env.monitors`）、`PhaseInfo`（`env.info`） | 裁判：现在在五段里的哪一段、这一步出了什么事、成功和硬失败 |
-| `observations.py` | `InstrumentTip2D`、`InstrumentShape2D`、`TaskTarget2D`、`JunctionMap2D`、`PhaseOneHot`、`InsertionDiff`、`InsertionLengthsNormalized`、`ScriptSuggestion`、`FrameHistory`；包装 `TipNoise2D`、`Normalize2DTask` | 策略看到的东西（下面"观测"一节） |
-| `rewards.py` | 九项，见"奖励"一节 | 每项一个 stEVE `Reward`，配置里逐项列，自动相加 |
-| `terminal.py` | `PlatformReached`、`HardFailure` | 真结束（不往后估价值）：成功、硬失败 |
-| `truncation.py` | `PhaseCutoff` | 截断：到了训练器给的段号就停这一局（往后估价值） |
-| `wall.py` | `WallDistance`（`env.monitors`）、`WallPenetration`（`env.labels`）、`WallBreach`（`env.truncation`） | 拿碰撞网格本身量每根器械所有碰撞点离血管壁多远：标签记这一步最深陷进墙多少；中心线出了网格就截断这一局（物理从这里起已经错了，和 `SimError` 一样） |
-| `actions.py` | `TwoDeviceGuarded`（`env.action`）、`NominalAdvisor`（`env.monitors`）、`ShieldInfo`（`env.info`） | 安全壳；脚本建议的通道 |
-| `labels.py` | `InstrumentTipForce`、`CatheterTipForce`、`TipClearance`、`SubstepMotion` | 训练答案（不进观测）；壳的力限也读它。`SubstepMotion`：一个 2 ms 小步里节点最多挪了多少 mm，和碰撞预判范围对着看 |
-| `targets.py` | `RouteWindowTarget` | 目标点 |
-| `start.py` | `WireFirst`（`env.start`） | 开局：每局先只送导丝到 40 mm（下面"开局"一节） |
-| `snapshot.py` | `FromSnapshot`（`env.start`）；`capture` / `save` / `load` / `restore_simulation`（库里的函数，`scripts/make_snapshots.py` 用） | 开局存档：把手写推法走过前缀后的仿真状态存下来，每局抽一份恢复、从接手点开始，省掉重复仿真的开局（下面"开局存档"一节） |
-| `../instruments/hook.py` | `HookCatheter` | lab 的钩形导管 |
-| `script.py` | `StagedController`（训练时的老师，不进配置） | 手写推法：从插入点一次走到右颈内（或第一轮的右颈总目标），见下面"手写推法"一节 |
+“配置里的名字”就是 YAML 里 `type:` 后面写的。最后一列：**用** = 现在的配置在用；**第一轮** = 只有 `two_devices_round1.yaml` 用，留着没删。
 
-为了接上这些零件，框架里加了两处（只加不删，旧配置照常）：
+| 文件 | 零件（配置里的名字） | 管什么 | 现在 |
+| --- | --- | --- | --- |
+| `route.py` | `Route`（内部用，不进配置） | 路线和尺子：沿血管走多远、进某根血管多深、离目标还有多少路 | 用 |
+| `phases.py` | `PhaseDetector`（`env.monitors`）、`PhaseInfo`（`env.info`） | 裁判：五段、两档、事件、硬失败、进度比例、地标格 | 用 |
+| `observations.py` | `InstrumentTip2D`、`InstrumentShape2D`、`TaskTarget2D`、`JunctionMap2D`、`TierFlag`、`InsertionDiff`、`InsertionLengthsNormalized`、`FrameHistory`；包装 `TipNoise2D`、`Normalize2DTask`；`TaskBox2D`（`env.monitors`） | 策略看到的东西；画面坐标归一用的框 | 用 |
+| `observations.py` | `PhaseOneHot`、`ScriptSuggestion` | 段号、脚本的建议动作 | 第一轮 |
+| `reward_formula.py` | `TwoDeviceFormula`（`env.reward_formula`） | 奖励：一份公式，环境实时算一遍，回放抽样时按存下的原料再算一遍 | 用 |
+| `rewards.py` | `ZeroReward` | 占住 stEVE 的奖励槽（真正的分由上一行算） | 用 |
+| `rewards.py` | `LeadingTipProgress`、`CatheterToF`、`HookPrepPotential`、`PhasePotential`、`WindowPenalty`、`EventPenalty`、`ShieldPenalty`、`StepPenalty`、`OutcomeReward` | 逐项相加的九项奖励 | 第一轮 |
+| `terminal.py` | `PlatformReached`、`HardFailure` | 真结束（不往后估价值）：第二档成功、出血管 | 用 |
+| `truncation.py` | `TipForceBlowup`、`ForceBlowupInfo`（`env.info`） | 接触力爆掉时截断这一局，当仿真故障 | 用 |
+| `truncation.py` | `Stalled`、`StallInfo`（`env.info`） | 两根器械的送入长度在 `window_steps` 步里净变化都不到 `min_mm` 就截断这一局（旋转不算在动）。默认不生效：`env.end_when_stalled()` 只对下一局开（考试用，`evaluation.end_when_stalled`），`always: true` 每局都开 | 只在考试里用 |
+| `truncation.py` | `PhaseCutoff` | 到了训练器给的段号就停 | 第一轮 |
+| `wall.py` | `WallDistance`（`env.monitors`）、`WallPenetration`（`env.labels`）、`WallBreach`（`env.truncation`）、`WallInfo`（`env.info`） | 拿碰撞网格量器械离血管壁多远；中心线出了网格就截断，当仿真故障 | 用 |
+| `actions.py` | `TwoDeviceLimits`（`env.action`）、`ShieldInfo`（`env.info`） | 动作映射：机器人模式层 → 速度上限 → 送入长度限位；报执行了什么 | 用 |
+| `actions.py` | `TwoDeviceGuarded`、`NominalAdvisor` | 第一轮的六道安全壳；脚本建议的通道 | 第一轮 |
+| `labels.py` | `InstrumentTipForce`、`CatheterTipForce`、`TipClearance`、`SubstepMotion` | 训练答案（不进观测）：两头的受力、离壁距离、一个小步里节点最多挪多少 | 用 |
+| `targets.py` | `RouteWindowTarget` | 目标点：沿路线的一段里抽 | 用 |
+| `start.py` | `WireFirst`（`env.start`） | 开局：每局先只送导丝到 40 mm | 用 |
+| `snapshot.py` | `FromSnapshot`（`env.start`）、`EpisodeSnapshots`；函数 `capture`、`save`、`load`、`restore_simulation` | 仿真存档：存、恢复、训练局沿途存 | 起点库的两份配置用 |
+| `prefix.py` | `run_prefix`（函数，训练器在环境进程里调） | 手写推法每局现场走一段再交给策略 | “两根拐棍”用 |
+| `shadow.py` | `ShadowExpert`（`env.shadow_expert`） | 手写推法在旁边每步算出“换我会怎么做”，不执行，当模仿的答案 | “老师旁观”用 |
+| `script.py` | `StagedController`（不进 `type:`，由上面两行和录示范的脚本用） | 手写推法 | 用 |
+| `script_round1.py` | `StagedController` 的第一轮版 | `script.py` 在 2026-11-06 重调之前的原文，逐字留着做对照，有测试锁住 | 对照 |
+| `../instruments/hook.py` | `HookCatheter` | lab 的钩形导管 | 用 |
 
-- `builder.py`：配置里可以写 `monitors:`（每项 `{name: ..., type: ...}`），建一次，每步紧跟仿真走、在观测和奖励之前；后面的零件按名字拿到同一个实例。标签和动作映射提前建好，后面的零件按 `labels`、`action_map` 拿到。已经建好的观测项交给后面的项（`observation_terms`）。
-- `guidewire_env.py`：`env.monitors`；`env.set_cutoff(k)` 把截断点交给所有接受它的零件；`env.reset(options={"cutoff": k})` 也行。
+配置里另外几个名字不在这个文件夹：`Rotations`、`LastAction`、`MaxSteps`、`SimError` 等来自 stEVE 或框架。
+
+## 现在的配置怎么接这些零件
+
+- **裁判**：配置里叫 `phase_detector`，每步紧跟仿真走，在观测和奖励之前；别的零件按这个名字拿到同一个实例。它读三维真值，只给奖励、真结束、截断、标签、存档、手写推法用，不进观测（只有“已拿第一档”一位例外）。
+- **奖励**：stEVE 的奖励槽放 `ZeroReward`；环境在标签算完以后调 `reward_formula` 算本步的分，原料放进 `info["reward_materials"]`。原料 15 个数（`reward_formula.py` 的 `FIELDS`）：进度、跟进、摆钩点尺子的两个备用量、两头受力、进错血管、第一档、成功、出血管、数值崩、领先、“只算新进展”的两个备用量、动作变化。
+- **观测**（120 个数，顺序见配置）：两个头、两段形状、导丝目标、导管目标 F（`TaskTarget2D(point: F)`）、路口地图（`mode: all`，路线上六个路口一次全给；过了目标的路口位置照列、方向置 0）、送入长度、长度差、转角、最近三步执行的动作、第一档那一位、前两帧。所有画面坐标按整棵血管树的框归一（`TaskBox2D`，`region: tree`）。
+- **动作**（`TwoDeviceLimits`）：机器人模式层（默认直通，`mode_map` 换）→ 速度上限 → 送入长度限位。执行了什么记在 `info["executed_action"]`，观测里的最近三步动作读它。
+- **一局**：`WireFirst` 开局；步数上限从插入点算，前缀走的步也算在内；数值崩、穿墙、力爆掉都是截断，训练器把那一步丢掉。
+- **起点课程**（训练器那边，`train/curriculum.py`）：按裁判报的进度比例 `progress_ratio` 分十格，或按地标格 `landmark_grid`。三种供法：`prefix`（`run_prefix` 现场走）、`self` 和 `demos`（从存档恢复，`env.reset(options={"snapshot": 路径})`）。
+- **老师旁观**：`env.shadow_expert` 打开后，每步动作执行之前，手写推法按仿真真值算出答案，放进 `info["expert_action"]`；另有 `expert_stage`、`expert_substage`、`expert_off`（这一步没有答案的原因）、`expert_events`。
+- **目标**：`RouteWindowTarget(past_fork: v8, …)`，在颈内外分叉往上的一段里抽；候选点按奇偶分成训练用和考试用；`jitter_mm`（默认 0）让训练用的点每局沿路线前后随机挪这么多，考试用的点不挪；`sampling: uniform`（默认 `grid`）让训练用的点在整段里任取。
+- **备用、默认关的**：摆钩点尺子（`arch_ruler`；每个头到过摆钩点或进了头臂干以后换回普通尺子）；结束时按领先打折的软要求（`lead_soft_min_mm`）。
+
+配置里怎么写每个键、每个键什么意思，见 [`docs/training_framework.md`](../../../docs/training_framework.md)。
 
 ## 尺子怎么量
 
 - 血管树按中心线和路口连成一张图，距离都沿图量。
-- 从主动脉分出去的血管，中心线是从主动脉中间起的，头 19–21 mm 在主动脉腔里。它的"口"取中心线穿出主动脉管壁的地方（lab 的量法；头臂干口在中心线上 19.7 mm 处，z = 95.1）。腔里那一段算 0 长，头端越过口时尺子不跳。从细血管分出去的从路口算起：右颈总从头臂干末端算（计划写的"右颈总开口 = 头臂干末端"）。
+- 从主动脉分出去的血管，中心线是从主动脉中间起的，头 19–21 mm 在主动脉腔里。它的“口”取中心线穿出主动脉管壁的地方（头臂干口在中心线上 19.7 mm 处）。腔里那一段算 0 长，头端越过口时尺子不跳。从细血管分出去的从路口算起：右颈总从头臂干末端算。
 - 一个点属于哪根血管：落在哪根中心线管子里最深就算哪根。管子半径量到模型内壁，和内壁的差：中位 0.2 mm，路线附近最多 3.7 mm。
 - 深度 `depth(点, 血管)`：从这根血管的口量起，进去为正，没进为负（负值是回到口还要走的路）。
-- 关键位置（路线弧长，从主动脉起点量，mm）：插入点 1.5，O（头臂干在主动脉上的路口）177.9，右颈总开口 217.9。目标在右颈总开口过去 35–55 mm，从插入点沿路线 251.5–271.5 mm。第一个叉在右颈总开口过去 63.8 mm。
+- 关键位置（路线弧长，从主动脉起点量，mm）：插入点 1.5，头臂干在主动脉上的路口 177.9，右颈总开口 217.9。右颈总开口过去 63.8 mm 有一个向下的侧支，过去 90.9 mm 是颈内外分叉。
 
-## 五段（裁判）
+## 五段和两档
 
-变段要条件连续 2 步成立；条件按表里的顺序查，先成立的算数。d = 导丝插入长度 − 导管插入长度（正：导丝在前）。
+裁判把一局分成五段：过弓、摆钩、选口、出管、跟进。变段的条件、两档的条件、事件的门槛，都写在 `phases.py` 开头的说明里，门槛的数在配置的 `thresholds`。
 
-| 段 | 在干什么 | 去下一段 / 回退 |
-| --- | --- | --- |
-| P0 过弓 | 导丝领先，两根一起过弓 | → P1：导管头沿主动脉过 O 30 mm 以上 |
-| P1 摆钩 | 导丝退到钩后面，钩转朝上 | → P0：导管头退回 O 以下 30 mm；→ P2：d ≤ −35 且钩朝上（导管头最后 3 mm 的方向和 +z 夹角 < 60°） |
-| P2 选口 | 往回拉，钩进头臂干 | → P3：导管头进头臂干 ≥ 8 mm；→ P0：导管头退回 O 以下 60 mm；→ P1：钩被撑直（−10 < d < 0，即导丝头还在导管里、离管头不到 10 mm，且没过头臂干口） |
-| P3 出管 | 导丝出管进右颈总 | → P2：导管脱出口（进头臂干 < 4 mm）；→ P4：导丝进右颈总 ≥ 15 mm 且 d ≥ 10 |
-| P4 跟进 | 导管跟进右颈总 | → P2：导管脱出口；→ P3：导丝退到右颈总 < 10 mm |
+五段现在只进统计（`info` 的 `phase`、`max_phase`），不进奖励、不进观测。两处还在用它：考试里数“收丝挂钩四步走完的局”；旁观的老师按它把自己的阶段往前对齐。
 
-- P3/P4 里导管从口里滑出来（进头臂干 < 4 mm）就回到 P2；这时导丝多半已经出管（d > 0），不会再被判成"钩被撑直"掉到 P1。导管重新坐进 ≥ 8 mm 就回 P3，导丝条件满足再回 P4（2026-10-31 改：WP-B 实测，原来会一路掉到 P1 再也回不来）。
-- 成功：导丝头离目标 ≤ 5 mm，导管头进右颈总 ≥ 15 mm，15 ≤ d ≤ 45，三条同时保持 8 步。
-- 硬失败（−1，结束）：任一头超出所有中心线管子 6 mm 以上（出血管）；或两头插入长度差 < 0.5 mm 且两根都插进去 2 mm 以上（同长）。
-- 数值崩（NaN，stEVE 把器械扔回起点）：这一步什么都不变、不给奖励，由 `SimError` 截断。
-- 事件只在发生那一步计数：
-  - `wrong_vessel`：任一头进左颈总、左锁骨下或右锁骨下 ≥ 8 mm，退到 < 4 mm 后再进再算一次；
-  - `dislodged`：导管脱出口，即 P3/P4 → P2；
-  - `bare_advance`：壳把导管的快推削掉；
-  - `wire_lead_arch`：导丝头在主动脉里且领先 > 100 mm；
-  - `wire_past_fork`：导丝头过右颈总第一个叉（64 mm）。
-
-## 接口
-
-- 裁判：`env.monitors["phase_detector"]`。`.state` 是 `PhaseState`，有计划的十个字段：`phase`、`d`、`L_wire`、`L_cath`、`depth_bct_c`、`depth_rcca_c`、`depth_rcca_w`、`hook_up`、`events`、`steps_in_phase`。另外还有：
-  - 结果和计数：`max_phase`、`success`、`hard_failure`、`failure_reason`、`platform_steps`；
-  - 三维真值（血管坐标）：`wire_tip`、`cath_tip`、`cath_tip_dir`、`hook_angle_deg`；
-  - 位置：`branch_w/c`、`clearance_w/c`、`aorta_pos_c`（导管头沿主动脉离 O 多远）；
-  - 路程：`path_to_target_w/c`、`path_to_F_c`、`dist_to_target_w`；
-  - 过弓段尺子用的：`to_hook_w/c`、`hook_to_target`、`hook_to_F`。
-
-  `.route` 是尺子（`locate`、`depth`、`s`、`path_to_target`、`aorta_position`、`junctions`、`target`）。
-- 两根器械各自的三维折线（头在前）：`two_device.phases.devices_of(env.simulation)`。要从领先的头往回数，见"发现的问题"1。
-- 截断点：训练器每局 reset 前调 `env.set_cutoff(k)`（k = 2/3/4/5，5 = 只到成功才停），或 `env.reset(options={"cutoff": k})`。不设就是 5。
-- 脚本建议（残差用，现在没接）：`monitors` 里加 `{name: nominal_advisor, type: NominalAdvisor, controller: {type: "包.模块.类", ...}}`。每步裁判之后，拿 `PhaseState` 调控制器的 `nominal_for_phase`，期望返回 4 个 [−1, 1] 的数或 None。观测里的"脚本建议"和 info 的 `nominal_action` 读它。
-
-## info 里的键
+## info 里常用的键
 
 | 键 | 是什么 |
 | --- | --- |
 | `phase`、`max_phase` | 这一步的段号、本局到过的最高段 |
-| `events` | 这一步的事件计数（字典，五个键见上） |
-| `is_success`、`hard_failure`、`failure_reason` | 成功；硬失败及原因（`outside_wire`、`outside_cath`、`same_length`） |
-| `d` | 导丝减导管的插入长度，mm |
-| `cutoff` | 本局的截断点 |
-| `sim_error`（和框架的 `simulation_error`） | 这一步 NaN |
-| `policy_action` | 策略给的动作（4 个数，[−1, 1]） |
-| `executed_action` | 仿真实际执行的（stEVE 的 `last_action` ÷ 速度上限） |
-| `shield_delta` | 执行的 − 策略的 |
-| `nominal_action`、`nominal_available` | 下一步的脚本建议（没有脚本时全 0、False） |
-| `shield_penalized` | 壳这一步被扣分的改动量（各轴改了多少 ÷ 上限，加起来） |
-| `shield_stages` | 这一步改了动作的阶段名 |
-| `shield_causes` | 每个阶段名 → 这一步改没改（1/0），七个键固定：`speed`、`residual`、`hard_rule`、`force`、`device_limit`、`protector_cross`、`protector_clamp` |
+| `events` | 这一步的事件计数：进错血管、脱出口、第一档 |
+| `is_success`、`hard_failure`、`failure_reason` | 第二档成功；硬失败和原因 |
+| `tier1` | 本局拿过第一档没有 |
+| `progress_ratio` | 两把尺子已走的路占全程多少，0 到 1 |
+| `landmark_grid`、`landmark_grids` | 地标格和总格数 |
+| `d` | 导丝减导管的送入长度，mm |
+| `policy_action`、`executed_action` | 策略给的动作、仿真实际执行的（都按速度上限归一） |
+| `reward_materials` | 这一步的奖励原料 |
+| `expert_action` 等 | 老师的答案（打开旁观时才有） |
+| `wall_breached` | 这一步中心线穿出了血管网格 |
+| `snapshot_saved`、`snapshot_start` | 这一步存了一份存档；这一局是从哪份存档开的 |
 | `labels`、`label_details`、`raw_action` | 框架原有：标签值、标签细节、执行的原始速度 |
 
-## 观测（110 维，按这个顺序）
-
-二维坐标是 C 臂画面上的坐标（mm），按任务区的框（弓、三支、右颈总开口往上 100 mm；中心线点各放大一个半径再加 5 mm）缩到 [−1, 1]。C 臂 [61, −21] 时框是 185.5 × 196.4 mm。头后各点是相对头的位置，除以同一个半框。
-
-| 项 | 维 | 是什么 |
-| --- | --- | --- |
-| `wire_tip` | 2 | 导丝头的画面位置，加跟踪噪声（每局抽一个幅度 0.5–1 mm，每步每轴在 ± 幅度内均匀抽） |
-| `wire_shape` | 8 | 导丝头后 4 个点（沿画面上的曲线每 4 mm 一个），相对头 |
-| `cath_tip` | 2 | 导管头，噪声同上 |
-| `cath_shape` | 12 | 导管头后 6 个点（每 10 mm），相对头 |
-| `target` | 2 | 目标的画面位置 |
-| `junctions` | 8 | 往前两个"两根头都没进 ≥ 8 mm"的路口：位置（每局偏 ±3 mm，一局内不变，再取到 2 mm 格）+ 要进的那根血管头 10 mm 的画面方向；过了最后一个路口用目标补位 |
-| `inserted` | 2 | 两根的插入长度 ÷ 各自全长 |
-| `d` | 1 | d ÷ 100 mm，截到 [−1, 1] |
-| `rotation` | 4 | 两根转角的 sin、cos |
-| `last_actions` | 12 | 最近 3 步执行的动作（新的在前），÷ 速度上限 |
-| `suggestion` | 4 | 脚本对下一步的建议；没接脚本时全 0 |
-| `phase` | 5 | 段号的独热 |
-| `history` | 48 | 前两帧的 `wire_tip`、`wire_shape`、`cath_tip`、`cath_shape`（和当时看到的一样，噪声在内） |
-
-全是真机拿得到的量：画面跟踪、编码器、执行过的动作、段号。三维真值只给裁判、奖励、标签和壳。路口地图判断"进没进 8 mm"用的是三维深度（计划这样定）；真机上这一步要靠画面判断。
-
-## 奖励（逐项相加）
-
-| 项 | 系数 | 怎么算 |
-| --- | --- | --- |
-| `LeadingTipProgress` | 0.01 / mm | 两头里离目标路程短的那个更近了多少（势能 = −两者较小值，换领先头时不跳） |
-| `CatheterToF` | 0.003 / mm | 导管头到 F（右颈总里 15 mm，成功要求的深度）的路程短了多少；过了 F 为 0 |
-| `HookPrepPotential` | 0.006 / mm | 势能 = 把 −d 夹在 [0, 35]：导丝退到钩后面挣分；本局第一次 P2 → P3 后锁死到局末，导丝出管不扣回 |
-| `PhasePotential` | 0.2 / 段 | 段号当势能，回退扣回 |
-| `WindowPenalty` | −0.001 / mm | d 在本段窗口外多少：P0 [10, 80]、P1 [−120, 0]、P2 [−120, −30]、P3 [−100, 80]、P4 [15, 60]。P2 里导丝已出管（d > 0）且导丝头过了头臂干口时（导管从口里滑出来退回的 P2），用 P3 的窗口 [−100, 80]；按当前状态判，不记从哪退回来的 |
-| `EventPenalty` | −0.1 / 次 | 进错血管 |
-| `ShieldPenalty` | −0.05 × | 壳被扣分的改动量 |
-| `StepPenalty` | −0.002 / 步 | |
-| `OutcomeReward` | +1 / −1 | 成功 / 硬失败 |
-
-过弓段（P0）的尺子：前两项在 P0 里换一把尺子量，D = 到摆钩点 H 还剩的路程 + 从 H 到各自目标的固定路程。H 是沿主动脉过 O 30 mm 的点，也就是 P1 开始的地方；过了 H 前一项为 0，所以在 P0 里往 H 以外走既不挣也不扣。到了 P1 换回正常沿血管树的路程。两把尺子在 H 处相等，P0 → P1 时不跳。只差裁判确认 P1 那 2 步里导管越过 H 的那一点：最多约 7 mm，折合两项 0.02 和 0.07。从 P1 回退到 P0 时跳回去，等于扣回 P0 里挣的。在侧支里量的是回到 H 的路程，所以在 P0 里钻进左锁骨下不算进度。
-
-为什么改：P0 要把导管推过口 30 mm 才进 P1，原来的路程尺在这段反而扣分（导丝领先 20 mm 时约 −0.5）。
+完整的键看各个 `…Info` 类。
 
 ## 开局（`WireFirst`）
 
-每局开始、策略走第一步之前：两根器械回到插入点，再只推导丝，全速（一步 5.28 mm：stEVE 一步跑 66 个 2 ms 小步），最后一步放慢，8 步停在 40 mm；导管停在插入点（0 mm），钩还没出来。这 8 步在 stEVE 的 `start` 里走，在观测、奖励、裁判重置之前，不算这一局的步数；走完把"执行过的动作"清零，策略看到的第一帧和没动过一样。`configs/two_devices_real_mass.yaml` 用它，第一轮配置还是 stEVE 的 `InsertionPoint`（两根都在 0）。
+每局开始、策略走第一步之前：两根器械回到插入点，再只推导丝，全速（一步 5.28 mm：一个控制步是 33 个 4 ms 的小步），最后一步放慢，8 步停在 40 mm；导管停在插入点，钩还没出来。这 8 步在 stEVE 的 `start` 里走，在观测、奖励、裁判重置之前，不算这一局的步数；走完把“执行过的动作”清零，策略看到的第一帧和没动过一样。`configs/two_devices_real_mass.yaml` 起的配置都用它，第一轮配置用的是 stEVE 的 `InsertionPoint`（两根都在 0）。
 
-为什么（2026-11-04 实测，`docs/simulator_changes.md` 问题 23）：插入点在降主动脉中线上（那里血管半径约 11.2 mm），器械杆身在插入点被固定在中间；钩（130°、半径 8 mm、加 8 mm 直头）向一侧伸出约 19 mm，钩在插入点 40 mm 以内出来就张不开、压在壁上（3–7 N，撞上那一下 9 N）。随机推拉 10 局 × 300 步，导管头在 40 mm 以内的 535 步里 124 步超过 2 N；先送导丝以后 325 步里 12 步。剩下的都是随机动作把导丝抽回到只领先 2.5–11 mm 时（钩又落在导丝最前面 30 mm 的软头上或出来了）。之后导丝领不领先由策略自己管，壳里不加规则（用户定，2026-11-04）；第一段的窗口奖励（P0 里 d 在 [10, 80]）本来就要它领先。钩套在导丝杆身上是直的，是从受力推断的，没看形状。
+为什么（2026-11-04 实测，`docs/simulator_changes.md` 问题 23）：插入点在降主动脉中线上（那里血管半径约 11.2 mm），器械杆身在插入点被固定在中间；钩（130°、半径 8 mm、加 8 mm 直头）向一侧伸出约 19 mm，钩在插入点 40 mm 以内出来就张不开、压在壁上（3–7 N，撞上那一下 9 N）。随机推拉 10 局 × 300 步，导管头在 40 mm 以内的 535 步里 124 步超过 2 N；先送导丝以后 325 步里 12 步。之后导丝领不领先由策略自己管，不加规则（用户定，2026-11-04）。
 
-## 开局存档（`FromSnapshot`，2026-11-09）
+## 仿真存档（`snapshot.py`）
 
-为什么：起点课程把一局交给策略时，前面那段（过弓、摆钩，约 230 步、一局时间的三分之一）每局都重新仿真一遍。存档恢复把这段省掉：先用手写推法跑若干种子，在接手点把仿真状态存成文件（`scripts/make_snapshots.py` 建库，`runs/snapshots/<配置名>/`，每份约 20 KB），训练时 `env.start` 换成 `FromSnapshot`，每局按概率 `fraction` 从库里抽一份恢复，其余局走 `WireFirst` 的普通开局。还没写进任何训练配置（怎么抽、抽多少归"一局怎么开始"那块设计）。
+存的是什么：BeamAdapter 每个小步都按两根器械的送入长度重新排节点，所以要存的只有三样——推进控制器的送入长度、转角、`indexFirstNode`；梁每个节点的位置（含朝向）和速度。裁判的经历（段、事件累计、计数）一起存。
 
-仿真的"状态"是什么：BeamAdapter 每个小步都按两根器械的插入长度重新排节点，所以要存的只有三样——推进控制器的插入长度、转角、`indexFirstNode`；梁每个节点的位置（含朝向）和速度。接触力求解的热启动表每局重建场景时本来就是空的。恢复 = 新场景 `reset` 之后把控制器的三样设成存档值，加一个一次性的 SOFA 控制器，在第一个小步控制器排好节点之后、碰撞检测之前把节点位置和速度整个覆盖回去，然后这个小步照常算一次 4 ms 物理（零动作）。不用更短的小步：接触约束是改位置的，0.01 mm 的缝隙在 0.1 ms 里合上就是 100 mm/s 的速度冲击（实测）。
+怎么恢复：新场景 `reset` 之后把控制器的三样设成存档值，再加一个一次性的 SOFA 控制器，在第一个小步控制器排好节点之后、碰撞检测之前把节点位置和速度整个覆盖回去，然后这个小步照常算一次物理（零动作）。恢复以后裁判保留存档里的经历，其余的量按这一局自己的目标重新量。观测里带记忆的项（最近几步动作、前几帧）从头开始。
 
-裁判（`PhaseDetector`）的段号是走出来的，所以它的状态（段、段内步数、事件累计、候选段、武装标志、未计的事件）一起存，由 `PhaseDetector.reset` 末尾装回（stEVE 先重置 `start` 再重置监控，`FromSnapshot` 把它挂在 `intervention.snapshot_referee_state` 上）。观测里带记忆的项（上几步动作、前几帧）从头开始，当"策略刚接手"。截断点 `cutoff` 用这一局自己的，不用存档里的。
+两种用法：
+- 训练器指定：`env.reset(options={"snapshot": 路径})`，起点库用这个。训练局沿途存档由 `EpisodeSnapshots` 做，每局第一次走进新的一格就存一份，`step` 回来的 `info` 带 `snapshot_saved`。
+- 固定库按概率抽：`env.start` 写 `FromSnapshot`，每局按 `fraction` 从库里抽一份，其余局走普通开局。`count_saved_steps: true` 时，从存档开的局步数上限扣掉存档前已走的步数。
 
-限制：存档记着物理步长和器械清单（名字、长度），对不上就拒绝恢复（`RuntimeError`）；节点数对不上也拒绝（说明场景设置变了，比如 `min_beam_length`）。库里默认只用裁判段 ≤ 2 的存档（`max_phase`）：导丝出管以前手写推法不看目标，这些存档对任何目标都能用；更深的接手点要连目标一起存，还没做。
+限制：存档记着物理步长和器械清单（名字、长度），对不上就拒绝恢复；节点数对不上也拒绝。存档只能在存它的那根血管上恢复。
 
-验证（`tests/test_snapshot.py`，SOFA）：第 60 步存、恢复后头端和参照差 < 0.05 mm，接着 8 个录好的动作重放头端差 < 0.1 mm、受力差 < 0.05 N、裁判段相同；`FromSnapshot` 按 `fraction` 抽或退回普通开局；步长 / 器械不符、空库报错。多种子多接手点的详细验证见 [`docs/simulation_speed.md`](../../../docs/simulation_speed.md)"开局存档"一节。
-
-## 安全壳（`TwoDeviceGuarded`，按顺序）
-
-1. `speed` 限速：导丝 40 mm/s、π rad/s，导管 25 mm/s、π/2 rad/s。配置里两根器械的速度上限就设成这几个数，所以策略的 [−1, 1] 正好铺满。
-2. `residual` 残差框：壳里默认关（`residual_phases: []`），由规划器自己做（`planning.residual`，逐步放宽 Δ）。
-3. `hard_rule` 不许裸头快冲：导管头在分支里（主动脉以外）且领先导丝 10 mm 以上（d < −10）时，导管推进超过 0.15（3.75 mm/s）就削到 0.15。导丝在管里时慢送导管能过（lab 脚本的 3 mm/s）。削的时候记一次 `bare_advance`。
-4. `force` 力限：头端力上一步超过上限的那根不许推（往回拉可以）。导丝的上限只在它领先时管用（在导管里时它的"头端力"其实是导管壁的力）。
-5. `device_limit`：stEVE 自己的长度限制（推拉后会 ≤ 0 mm 或 ≥ 全长的那根，stEVE 会归零）。壳先替它做，第 6 步才能预测对；不扣分。
-6. 同长保护（2.5 mm）：一步结束时两头插入长度差不许在 ±2.5 mm 以内，按"插入长度 + 速度 × 1/7.5 s"预测。
-   - 要穿过去的：只把本来就朝穿的方向动的那根（或两根）在自己的上限内加速，穿到对面 2.5 mm（`protector_cross`，不扣分）。另一根绝不动，不会被往它命令的反方向拉。
-   - 加速也穿不过去，或者只是靠近、停在带里的：停在带的近边，办法是让往带里走的那根减速（`protector_clamp`，扣分）。
-   - 开局两头都在 0：只要往外走就行。
-   - 带宽 5 mm，比导丝一步最多走的 5.3 mm 窄，导丝自己能穿；导管一步最多 3.3 mm，自己穿不过。
-
-力限的数（2026-10-31 实测）：力是标签值（一步 22 个物理小步里的最大值，N）。测的时候把壳的力限关掉，免得力被削。
-
-| 推法 | 导丝头（导丝领先时）50 / 90 / 99 分位 / 峰值 | 导管头 50 / 90 / 99 分位 / 峰值 |
-| --- | --- | --- |
-| 手写的小心推法，3 局（种子 3、11、23），1260 步，到过 P0–P3 | 0.020 / 0.112 / 0.428 / 0.895 | 0.000 / 0.507 / 1.613 / 23.2（一次尖峰） |
-| 随机动作，3 局，900 步，都在 P0 | 0.000 / 0.276 / 14.96 / 15.67 | 0.000 / 8.82 / 18.91 / 32.56 |
-
-上限取手写推法 99 分位的 1.5 倍：导丝 1.0 N（按 99 分位 × 1.5 本是 0.64 N，2026-10-31 19:20 提到 1.0 N：脚本的导丝在头臂干分叉口探路时 0.64 N 就被停推、2/20 局卡住；1 N 也是医生 agent 的阈值），导管 2.42 N，P1 里导管放宽一倍（4.84 N）。这一套是默认质量的器械，推狠了接触力能到十几、几十牛，所以计划原来写的 1.0 / 2.0 N 不能直接用。
-
-壳在两种推法下改动作的步数占比（最终配置）：
-
-| 推法 | 改过的步 | `force` | `device_limit` | `protector_cross` | `protector_clamp` | 平均每步扣分 |
-| --- | --- | --- | --- | --- | --- | --- |
-| 手写推法，3 局 | 26.6 % | 15.8 % | 10.2 % | 0.2 % | 0.4 % | 0.008 |
-| 随机动作，3 局 | 26.1 % | 3.4 % | 10.3 % | 3.6 % | 11.2 % | 0.003 |
-
-手写推法里大部分干预出在它失败后的尾巴：导管被撑出口后，导丝一直推到顶住、推到全长。
+验证在 `tests/test_snapshot.py`；多种子多接手点的验证见 [`docs/simulation_speed.md`](../../../docs/simulation_speed.md)“开局存档”一节。
 
 ## 标签
 
@@ -187,87 +115,55 @@
 | `catheter_tip_force` | 导管头最后 3 mm 的接触力 |
 | `wire_tip_clearance`、`catheter_tip_clearance` | 两头离壁距离（mm，在血管里为正），用中心线管子算 |
 
-两根器械在 BeamAdapter 里是一根共用节点的梁，碰撞链的末端是领先的那个头。较短的那根头在"领先的头往回数 x mm"处（x = 两根插入长度差，每个物理小步重读），它的最后 3 mm 就是 [x, x + 3] mm，在这里的接触按参考代码的方法定位、相加。领先的那根算出来就是 G13 的 `DistalForce`（有测试逐位比对）。
+两根器械在 BeamAdapter 里是一根共用节点的梁，碰撞链的末端是领先的那个头。较短的那根头在“领先的头往回数 x mm”处（x = 两根送入长度差，每个物理小步重读），它的最后 3 mm 就是 [x, x + 3] mm，在这里的接触按参考代码的方法定位、相加。领先的那根算出来就是 G13 的 `DistalForce`（有测试逐位比对）。
 
-## 手写推法（`script.py`，2026-11-06 按新设置重调、延到右颈内）
+## 手写推法（`script.py`）
 
-用途：第二轮训练的老师——起点课程、示范数据、评估参照、奖励校验。读仿真真值，只在训练时用。配置 [`configs/two_devices_ica.yaml`](../../../configs/two_devices_ica.yaml)（继承真实质量配置：目标在颈内/颈外分叉上 20–40 mm，裁判成功 = 导丝进目标 5 mm 球 + 导管进颈内 ≥ 5 mm + 领先 15–45 mm 保持 8 步，MaxSteps 800）。目标在右颈总里时（第一轮的两个配置）仍走老终点（导管进颈总 ≥ 15 mm）。
+用途：前缀、示范、旁观的老师、考试的参照、奖励校验。它读仿真真值，只在训练时用，部署时没有。
 
-阶段和每步的完成判据、补救：
+每个阶段做什么：
 
 | 阶段 | 做什么 | 完成 / 补救 |
 | --- | --- | --- |
 | 过弓 | 导丝领先 40 mm，两根一起过弓 | 导管头过头臂干口 33 mm |
 | 摆钩 | 导丝退到钩后 37 mm，钩朝下，钩底拉到口上方 4 mm | 到位；超时换下一个偏移 |
-| 转钩 | 钩原地转朝上，瞄 −30°、容差 20°（软钩翻过顶后停在约 −50°，瞄 0° 永远等不到） | 稳 3 步；40 步超时就重摆 |
+| 转钩 | 钩原地转朝上，瞄 −30°、容差 20°（软钩翻过顶后停在约 −50°，瞄 0° 永远等不到） | 稳 3 步；超时就重摆 |
 | 拉进、坐稳 | 3 mm/s 回拉，钩尖进头臂干 2 mm 再拉到 20 mm（再拉只到 23，拉 35 mm 会整根出口） | 深度到；拉空、进错血管就重摆 |
 | 出管 | 导丝 30 mm/s 出到领先 16 mm，导管不动（推导管只会把梁在弓里压弯） | 领先到 |
-| 瞄准 | 从导丝折线读软头弯的方向，转导丝到背离右锁骨下（增益 2、容差 35°、最多 12 步） | 对准或超时 |
-| 快推 | 25 mm/s 冲头臂干末端；两步进不到 1 mm、两步退 1.5 mm、导管头退 3 mm 都退 1 步再冲 | 导丝进右颈总 6 mm；进锁骨下 > 7 mm 退回头臂干 30 mm 再瞄再冲 |
+| 瞄准 | 从导丝折线读软头弯的方向，转导丝到背离右锁骨下 | 对准或超时 |
+| 快推 | 25 mm/s 冲头臂干末端；进不动、往回退、导管头后退都退 1 步再冲 | 导丝进右颈总 6 mm；进锁骨下太深就退回头臂干再瞄再冲 |
 | 上颈总 | 10 mm/s，导管只在滑出 8 mm 以内时慢拉 | 到 50 mm 交给颈内段 |
-| 颈内段 | 64 mm 的向下侧支（`v7`）前后瞄背离它，分叉下 20 mm 起瞄颈内一侧、对准才以 4 mm/s 推；进颈外 > 6 mm 退到分叉下 10 mm 再瞄 | 进颈内 ≥ 30 mm（至少到目标深度）算锚住；15 步不进退 8 mm；150 步超时重坐 |
-| 跟进 | 导管顺导丝 8 mm/s（末端、分叉前后 3 mm/s）；导丝底部不动（导丝头卡住时喂进去的长度只会把链压弯）；8 步不进就"推 3 停 3"；一步跳 3 mm 以上刹 2 步 | 到导管目标（目标深度 − 22，至少分叉上 7）前 2 mm；导丝滑到分叉上 5 mm 以内就停推、回颈内段重锚 |
-| 收尾 | 导丝修到目标，导管修到目标深度，领先 15–45 | 裁判条件保持 8 步 |
+| 颈内段 | 向下的侧支前后瞄背离它，分叉下 20 mm 起瞄颈内一侧、对准才慢推；进颈外太深就退到分叉下再瞄 | 进颈内够深算锚住；不进就退一点；超时重坐 |
+| 跟进 | 导管顺导丝走（末端、分叉前后放慢）；导丝底部不动；不进就“推 3 停 3” | 到导管目标前 2 mm；导丝滑回分叉附近就停推、回颈内段重锚 |
+| 收尾 | 导丝修到目标，导管修到目标深度 | 裁判的条件保持住 |
 
-导管出口 6 mm 以上（快推时的 1–2.5 mm 短暂出口不算）就导丝退回钩后重坐（记一次）。
+每个数和补救的细节在 `script.py` 的 `ScriptParams` 和文件开头的说明里。2026-11-14 加了几个默认关的参数，给旁观的老师用（钩在原地转朝上、永远朝同一个方向转、旁观时不认输等），见 `docs/training_framework.md`。
 
-新设置下量到的脾气（2026-11-06，详见 `script.py` 文档字符串和工作日志）：两根器械在 BeamAdapter 里是一条链，长度由领先那根定；导丝头顶住还推，链在弓里压弯、两头一起退（老脚本"一起爬"就是这样丢导管的）；推落后的导管不加长链、沿导丝 1:1 走，所以导管只在导丝头自由或锚住时能前进。导丝 30 mm 软头在头臂干末端前 9–13 mm 贴壁停住，慢推、各种转都过不去，25 mm/s 短促快推 8/8 能过（憋在弓里的长度一下放出来，导丝头一步跳 10 mm，和真实手术里"弹进分支"是一回事）；进哪支由软头弯的朝向定，瞄准后头臂干末端 4/4 进颈总、分叉 6/6 进颈内。
+这套仿真里量到的脾气（2026-11-06）：两根器械在 BeamAdapter 里是一条链，长度由领先那根定；导丝头顶住还推，链在弓里压弯、两头一起退；推落后的导管不加长链、沿导丝 1:1 走，所以导管只在导丝头自由或锚住时能前进。导丝 30 mm 软头在头臂干末端前 9–13 mm 贴壁停住，慢推、各种转都过不去，25 mm/s 短促快推能过（憋在弓里的长度一下放出来，导丝头一步跳 10 mm，和真实手术里“弹进分支”是一回事）；进哪支由软头弯的朝向定。
 
-验收（2026-11-07，颈内配置，种子 1000–1019，从插入点起，每局最多 800 步，4 进程并行）：**17/20 成功**，成功局 493–587 步（中位 514）；快推以前各步 20/20 过，快推把导丝送进右颈总 17/20，进了颈总的全部成功。3 局失败是同一种走法（目标起作用之前各种子的轨迹只差仿真器的线程时序）：导丝头到了头臂干末端却进不了任何一支，反复快推（55 次停、5 次退）把导管拖到口外 12 mm 以上，之后三次重坐也没过。受力：成功局导丝头最大 0.43 N（失败局 0.76），导管头 2.8–3.5 N（进颈内那几步）；每局墙钟 16–23 分钟。详见工作日志 2026-11-07 的验收条目。
+成功率：默认参数在种子 1000–1019 上 20 局成 17 局（2026-11-07、11-10 两次），失败的 3 局是同一种走法：导丝头到了头臂干末端进不了任何一支。每次验收和重录的数在 `agent_log/TRAINING_RECORD.md` 和工作日志里。
 
-## 发现的问题
+## 两个容易踩的地方
 
-1. **推送时节点折线比插入长度短**，较短那根的头要从领先的头往回数（lab 的 `arch_catheter.split` 和 WP-B 也这样）。stEVE 的 `instrument_trackings3d` 从根部往前数，推送时较短那根的头会偏几毫米。候选 gotcha。
-   - 2026-11-03 更正：原来写"两根器械共用的节点折线比插入长度短约 8 mm（插入 100–320 mm 时都是这样）"。实测这和"两根共用"无关，只插导丝也有；短的长度 = 推送速度 × 阻尼系数 `rayleighStiffness`（stEVE 写死 0.2 s）：满速 40 mm/s 短 8.0 mm、20 mm/s 短 4.0、10 mm/s 短 2.0，往回拉 20 mm/s 反过来长 4.0；停下约 3 步（0.4 s）追平；把系数改成 0.1 / 0.02，满速时短 4.0 / 0.8 mm。少掉的长度集中在插入口附近几节梁上（被压短 20% 多），是阻尼拖住伸长的速度，不是器械真的软。原来"都是 8 mm"是一直满速推着量的。数据和脚本：`agent_log/WORK_LOG.md` 2026-11-03 条。
-2. **stEVE 的 `TrackingOnly.tracking3d_space` 在 C 臂角度大时建不出来**：它把血管坐标框的两个角旋转后直接当上下界，[61, −21] 时有的维 low > high，gymnasium 拒绝。凡是要这个框的 stEVE 观测（`Target2D`、`Tracking2D`）都会报错，所以目标用自己写的 `TaskTarget2D`。候选 gotcha。
-3. **同长保护**（主会话 10-31 改过）：现在带宽 5 mm，导丝自己能一步穿过。但导丝出管时如果导管还在往前送（哪怕 3 mm/s），导丝一步要走 5 mm + 导管走的那一点，超过它的 5.3 mm，壳就把它停在 d = −2.5，一直到导管停送一步为止。脚本和策略在穿那一步要停送导管：手写推法里加了这一条后就穿过去了。
-4. **导丝出管会把钩撑直，导管从头臂干口滑出来**。手写推法里见到 P3 → P2 → P1，lab 代码的注释里也写了。lab 的办法是导丝过的时候慢送导管（v_keep 3 mm/s），硬规则放宽后这样能过。
-5. **默认质量的器械接触力很大**：随机动作 99 分位 15–19 N，峰值 33 N；小心推法 99 分位 0.4–1.6 N。另外，顶住墙的器械即使不再推，梁还压着，力会一直超限，要先往回退一点才能再推。
-6. **过弓段的进度奖励**（已改，见"奖励"）：原来要推过口 30 mm 才进 P1，进度项在这段反而扣分。
-7. **配置里写了示范目录** `training.demos.dir: runs/demos_round1`，开训前要先由 WP-B 录好。
-
-## 和计划不一样的地方
-
-- 计划的 `TipClearances` 拆成两个单值标签，因为训练器的回放只收标量。
-- 目标观测用 `TaskTarget2D`（问题 2）。
-- 胜利 +1 / 硬失败 −1 单独写成一项 `OutcomeReward`。计划第 1 节写了 −1，第 2 节的奖励清单没列。
-- `HookPrepPotential` 锁住后本局一直锁着，回退也不解锁，免得来回刷分。
-- "出血管"用中心线管子判，超出 6 mm 才算（路线附近管子和内壁最多差 3.7 mm）。
-- 壳里多了 `device_limit` 一步（不扣分），同长保护才能预测对。
-- 主会话 10-31 改的：
-  - 同长保护 3 → 2.5 mm，穿越只加速要穿的那根；
-  - 硬规则只拦 d < −10 时超过 0.15 的推进（削到 0.15，不是归零）；
-  - P0 的进度尺子；
-  - P2 → P1 的"钩被撑直"只在导丝头还在导管里（d < 0）且没过头臂干口时才算；
-  - P2 里导丝已出管且过了头臂干口时，d 窗口用 P3 的 [−100, 80]；
-  - 力限按实测校准（计划 1.0 / 2.0 N → 0.64 / 2.42 N，P1 里导管 × 2）；
-  - 残差框挪到规划器；
-  - `nominal_action` 报下一步的建议。
-
-## 步时
-
-单进程，绑两个性能核；机器同时在跑别的训练，负载 8–13，数会差约 30 %。插入 100 mm 和 250 mm 处，40 步平均都在 0.083–0.09 s/步左右（最慢一次 0.12），约 97 % 花在 SOFA 本身。这里的零件每步约 2–3 ms；两个受力标签合起来每步约 3 ms：参考代码逐条边用 Python 走要每个小步 2.5 ms，改成向量化算法后 0.13 ms。
+1. **推送时节点折线比送入长度短**，较短那根的头要从领先的头往回数。stEVE 的 `instrument_trackings3d` 从根部往前数，推送时较短那根的头会偏几毫米。短的长度 = 推送速度 × 阻尼系数（stEVE 写死 0.2 s）：满速 40 mm/s 短 8.0 mm，停下约 3 步追平。是阻尼拖住伸长的速度，不是器械真的软（2026-11-03 实测）。
+2. **stEVE 的 `TrackingOnly.tracking3d_space` 在 C 臂角度大时建不出来**：它把血管坐标框的两个角旋转后直接当上下界，有的维 low > high。所以目标用自己写的 `TaskTarget2D`；框架那一边的修正见 `docs/simulator_changes.md` 问题 21。
 
 ## 测试
 
 ```bash
-conda run --no-capture-output -n guidewire_rl python -m pytest -q tests/test_two_device_env.py              # 全部，约 20 s
-conda run --no-capture-output -n guidewire_rl python -m pytest -q tests/test_two_device_env.py -m "not sofa"  # 不起 SOFA，约 3 s
-conda run --no-capture-output -n guidewire_rl python scripts/inspect_env.py --config configs/two_devices_round1.yaml --steps 200
+conda run --no-capture-output -n guidewire_rl python -m pytest -q tests/test_two_device_env.py -m "not sofa"   # 不起 SOFA，几秒
+conda run --no-capture-output -n guidewire_rl python -m pytest -q tests/test_two_device_env.py                  # 含 SOFA
 ```
 
-锁住的有：
+| 改了什么 | 跑哪个 |
+| --- | --- |
+| 尺子、裁判、观测、奖励、动作 | `test_two_device_env.py`、`test_two_device_round2.py` |
+| 手写推法 | `test_two_device_script.py`（含一整局 SOFA）；第一轮版 `test_two_device_script_round1.py` |
+| 旁观的老师 | `test_shadow_expert.py` |
+| 存档、起点库 | `test_snapshot.py`、`test_start_library.py` |
+| 离壁、穿墙 | `test_wall_monitor.py` |
+| 受力标签、力爆掉的截断 | `test_tip_force_fast.py`、`test_force_blowup.py` |
+| 停住就结束 | `test_stall_end.py`（含真仿真器一条）；训练器那边在 `test_parallel.py` |
+| 训练器那边（课程、日程、回放） | `test_round2_training.py`、`test_round2_schedule.py`、`test_two_device_training.py` |
 
-- 尺子的关键位置和连续性；目标的奇偶划分；
-- 裁判在手造状态上的变段、回退、滞回、事件、成功、失败；
-- 每项奖励：势能在边界处不跳、钩的那项锁住后不扣回、过弓段尺子在 H 处和正常尺子相等且 P0 → P1 不跳、NaN 步不给分；
-- 壳的每一段：同长保护只加速要穿的那根、不动另一根；硬规则让 0.12 过、把 0.8 削到 0.15；
-- info 的键和 `shield_causes`；配置和计划对得上。
-
-SOFA 里：
-
-- 110 维观测的顺序；
-- `LastAction` 读的是执行后的动作；
-- 截断点能设进去；
-- 导管领先时导管头力和 `DistalForce` 逐位相同；
-- 手写推法从 P0 走到 P1。
+起 SOFA 的两器械测试共用 `tests/two_device_scenes.py`（建场景、推器械、读碰撞链）。

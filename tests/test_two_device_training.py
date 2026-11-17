@@ -1,4 +1,4 @@
-"""Trainer changes for the two-device round (todo_list/two_devices_training.md, WP-C).
+"""Trainer changes for the two-device round (todo_list/archive/two_devices_training.md, WP-C).
 
 Everything here runs on fake envs (no SOFA): the cutoff mixture and how the
 cutoff reaches the env (one env and worker processes), phase-stratified
@@ -799,12 +799,17 @@ def test_with_every_new_part_on_lockstep_training_still_reproduces(tmp_path):
 
 
 # --------------------------------------------- off = the code as it was --
-GOLDEN = {   # the pre-change code (2026-10-31), torch on one thread; tests/fakes.FakeEnv
+GOLDEN = {   # the pre-change code (2026-10-31), torch on one thread; tests/fakes.FakeEnv.
+    # eval_jsonl re-pinned 2026-11-10: the evaluation summary gained the monitor's fields
+    # (success_ci95_*, end_reasons, success_steps_*, force peaks, docs/wandb_metrics.md); the episodes
+    # themselves (replay, episodes.jsonl, the model, the sampler's picks) are the old code's.
+    # eval_jsonl re-pinned 2026-11-11: Q against the realized return only over episodes that really
+    # ended (FakeEnv's are all cut, so q_mean / g_mean / q_minus_g_mean left the summary); nothing else.
     "single": {"replay": "cccbf1ce40ccb6bc", "model": "4923168c1a9c9f74", "updates": 50,
-               "episodes_jsonl": "843d7cb05abe2a3b", "eval_jsonl": "ca89dc6944faf38c",
+               "episodes_jsonl": "843d7cb05abe2a3b", "eval_jsonl": "88ebe944b7243edf",
                "picks": "59fa5f04b2260c82"},
     "parallel": {"replay": "b43cfbbdb98fbd7a", "model": "68edfcdbfdb045d1", "updates": 50,
-                 "episodes_jsonl": "f5795526c6e24c35", "eval_jsonl": "03f8fa449e667366",
+                 "episodes_jsonl": "f5795526c6e24c35", "eval_jsonl": "d1f5057b6172eb2b",
                  "picks": "fd0bc730c229929a"},
 }
 

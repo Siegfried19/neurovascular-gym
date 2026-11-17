@@ -38,6 +38,19 @@ import numpy as np
 import torch
 
 FORMAT = "guidewire_rl.replay/1"   # episodes may carry "phase" and "demo" (older files: zeros / False)
+# round two (work log 2026-11-10): episodes may also carry "materials" (T x M, the reward's raw
+# materials, two_device/reward_formula.py), "source" (T, int8: SOURCE_*), "protected" (never evicted:
+# scripted demonstrations and the policy's own successful episodes kept as self-demonstrations, the
+# latter up to ``self_demo_capacity`` episodes, oldest out) and "outcome" (how the episode ended).
+# With a ``reward_fn`` configured, every sampled batch's rewards are recomputed from the materials.
+# DAgger-style labels (2026-11-13, env/two_device/shadow.py): every episode also carries "expert"
+# (T x action_dim float32): each step's imitation target, NaN where there is none. On the scripted
+# steps (sources prefix and demo) it is always the executed action; elsewhere what the env's shadow
+# expert reported (info["expert_action"]). Older episodes and files without it get exactly that
+# (the action on scripted steps, NaN elsewhere).
+SOURCE_POLICY, SOURCE_PREFIX, SOURCE_DEMO, SOURCE_SELF_DEMO = 0, 1, 2, 3
+SOURCE_NAMES = ("policy", "prefix", "demo", "self_demo")
+SCRIPTED_SOURCES = (SOURCE_PREFIX, SOURCE_DEMO)    # the script was in control: the target is the action
 
 PHASE_STRATA = ((0, 1), (2,), (3,), (4,))     # the stretches ended by cutoffs 2, 3, 4, 5
 STRATIFY_KEYS = (None, "phase")
@@ -55,6 +68,8 @@ class Batch:
     rewards: torch.Tensor               # (H, B, 1)
     terminated: torch.Tensor            # (H, B, 1)
     labels: Dict[str, torch.Tensor]     # each (H, B, 1)
+    source: Optional[torch.Tensor] = None   # (H, B) SOURCE_* of each transition (behaviour cloning)
+    expert: Optional[torch.Tensor] = None   # (H, B, act_dim) imitation target, NaN where none
 
 
 class EpisodeReplay:
@@ -73,13 +88,24 @@ class EpisodeReplay:
         self.stratify_by: Optional[str] = None
         self.stratify_min_samples = 20_000
         self.demo_fraction = 0.0
+        self.reward_fn: Optional[Any] = None           # materials (..., M) -> rewards (...)
+        self.n_materials: Optional[int] = None
+        self.materials_upgrade: Optional[Any] = None   # one episode's older materials -> current ones
+        self.self_demo_capacity: Optional[int] = None  # episodes; None = unbounded
         self._dirty = True
         self._flat: Dict[str, Any] = {}
 
     def configure(self, *, stratify_by: Optional[str] = None, stratify_min_samples: int = 20_000,
-                  demo_fraction: float = 0.0) -> None:
+                  demo_fraction: float = 0.0, reward_fn: Optional[Any] = None,
+                  n_materials: Optional[int] = None, self_demo_capacity: Optional[int] = None,
+                  materials_upgrade: Optional[Any] = None) -> None:
         """Batch biasing (see the module docstring); not saved with the replay, the
-        run's config sets it again on every start."""
+        run's config sets it again on every start. ``reward_fn(materials) -> rewards`` recomputes
+        every sampled reward from the stored materials (``n_materials`` fields each); every episode
+        must then carry materials. ``self_demo_capacity``: how many of the policy's own successful
+        episodes are kept protected (oldest out). ``materials_upgrade(materials, observations=...) -> materials``: brings
+        one episode's materials recorded with fewer fields up to date (derived fields); applied to the
+        episodes already here and to every one added from now on."""
         if stratify_by not in STRATIFY_KEYS:
             raise ValueError(f"replay.stratify_by must be one of {STRATIFY_KEYS}, got {stratify_by!r}")
         if not 0.0 <= float(demo_fraction) <= 1.0:
@@ -87,13 +113,41 @@ class EpisodeReplay:
         self.stratify_by = stratify_by
         self.stratify_min_samples = int(stratify_min_samples)
         self.demo_fraction = float(demo_fraction)
+        self.reward_fn = reward_fn
+        self.n_materials = None if n_materials is None else int(n_materials)
+        self.self_demo_capacity = None if self_demo_capacity is None else int(self_demo_capacity)
+        self.materials_upgrade = materials_upgrade
+        if materials_upgrade is not None:
+            for episode in self.episodes:
+                if episode.get("materials") is not None:
+                    episode["materials"] = np.asarray(
+                        materials_upgrade(episode["materials"], observations=episode["observations"]),
+                        dtype=np.float32)
+        if self.n_materials is not None:
+            wrong = [e["materials"].shape[1] for e in self.episodes
+                     if e.get("materials") is not None and e["materials"].shape[1] != self.n_materials]
+            if wrong:
+                raise ValueError(f"{len(wrong)} episode(s) have materials with {sorted(set(wrong))} fields, "
+                                 f"expected {self.n_materials}")
+        if self.reward_fn is not None:
+            lacking = [i for i, e in enumerate(self.episodes) if e.get("materials") is None]
+            if lacking:
+                raise ValueError(f"reward recomputation needs materials in every episode; {len(lacking)} "
+                                 f"episode(s) have none (re-record the demonstrations with this config)")
         self._dirty = True
 
     # ------------------------------------------------------------------ add --
     def add(self, observations: np.ndarray, actions: np.ndarray, rewards: np.ndarray,
             terminated: np.ndarray, labels: Optional[Mapping[str, np.ndarray]] = None, *,
-            phase: Optional[np.ndarray] = None, demo: bool = False) -> None:
-        """``phase``: one int per observation (length + 1); None means all 0."""
+            phase: Optional[np.ndarray] = None, demo: bool = False,
+            materials: Optional[np.ndarray] = None, source: Optional[np.ndarray] = None,
+            protected: Optional[bool] = None, outcome: str = "",
+            expert: Optional[np.ndarray] = None) -> None:
+        """``phase``: one int per observation (length + 1); None means all 0. ``materials``:
+        (length, M) reward materials; ``source``: one ``SOURCE_*`` per step (None: policy, or demo
+        when ``demo``); ``protected``: never evicted (default: ``demo``); ``outcome``: the end;
+        ``expert``: (length, action_dim) imitation targets, NaN where none (None: none); on the
+        scripted steps the action is the target whatever is given."""
         episode = {
             "observations": np.asarray(observations, dtype=np.float32),
             "actions": np.asarray(actions, dtype=np.float32),
@@ -101,8 +155,28 @@ class EpisodeReplay:
             "terminated": np.asarray(terminated, dtype=np.float32).reshape(-1),
             "labels": {k: np.asarray(v, dtype=np.float32).reshape(-1)
                        for k, v in (labels or {}).items()},
+            "outcome": str(outcome),
         }
         length = len(episode["actions"])
+        if materials is not None:
+            episode["materials"] = np.asarray(materials, dtype=np.float32).reshape(length, -1)
+            if self.materials_upgrade is not None:
+                episode["materials"] = np.asarray(
+                    self.materials_upgrade(episode["materials"], observations=episode["observations"]),
+                    dtype=np.float32)
+            if self.n_materials is not None and episode["materials"].shape[1] != self.n_materials:
+                raise ValueError(f"materials must have {self.n_materials} fields, got "
+                                 f"{episode['materials'].shape[1]}")
+        elif self.reward_fn is not None:
+            raise ValueError("this replay recomputes rewards from materials; the episode has none")
+        else:
+            episode["materials"] = None
+        if source is None:
+            source = np.full(length, SOURCE_DEMO if demo else SOURCE_POLICY, dtype=np.int8)
+        episode["source"] = np.asarray(source).reshape(-1).astype(np.int8)
+        if episode["source"].shape != (length,):
+            raise ValueError(f"source must have one entry per step ({length})")
+        episode["protected"] = bool(demo) if protected is None else bool(protected)
         if length < 1:
             raise ValueError("Episode has no transitions")
         if episode["observations"].shape != (length + 1, self.observation_dim):
@@ -110,6 +184,12 @@ class EpisodeReplay:
                              f"got {episode['observations'].shape}")
         if episode["actions"].shape != (length, self.action_dim):
             raise ValueError(f"actions must be ({length}, {self.action_dim})")
+        target = (np.full((length, self.action_dim), np.nan, np.float32) if expert is None
+                  else np.asarray(expert, dtype=np.float32))
+        if target.shape != (length, self.action_dim):
+            raise ValueError(f"expert must be ({length}, {self.action_dim}), got {target.shape}")
+        scripted = np.isin(episode["source"], SCRIPTED_SOURCES)[:, None]
+        episode["expert"] = np.where(scripted, episode["actions"], target).astype(np.float32)
         for key in ("rewards", "terminated"):
             if episode[key].shape != (length,):
                 raise ValueError(f"{key} must have length {length}")
@@ -129,9 +209,15 @@ class EpisodeReplay:
         episode["demo"] = bool(demo)
         self.episodes.append(episode)
         self.size += length
+        if self.self_demo_capacity is not None:
+            # the policy's own successful episodes: protected, but only the latest N of them
+            self_demos = [i for i, e in enumerate(self.episodes)
+                          if e["protected"] and not e["demo"]]
+            for i in self_demos[: max(len(self_demos) - self.self_demo_capacity, 0)]:
+                self.episodes[i]["protected"] = False
         while self.size > self.capacity:
-            # the oldest episode that is not a demonstration; never the one just added
-            victim = next((i for i, e in enumerate(self.episodes) if not e["demo"]), None)
+            # the oldest episode that is not protected; never the one just added
+            victim = next((i for i, e in enumerate(self.episodes) if not e["protected"]), None)
             if victim is None or victim == len(self.episodes) - 1:
                 break
             self.size -= len(self.episodes.pop(victim)["actions"])
@@ -144,6 +230,10 @@ class EpisodeReplay:
     @property
     def num_demo_episodes(self) -> int:
         return sum(1 for e in self.episodes if e["demo"])
+
+    @property
+    def num_self_demo_episodes(self) -> int:
+        return sum(1 for e in self.episodes if e["protected"] and not e["demo"])
 
     def _rebuild(self) -> None:
         H = self.horizon
@@ -160,20 +250,47 @@ class EpisodeReplay:
             "actions": np.concatenate([e["actions"] for e in self.episodes]),
             "rewards": np.concatenate([e["rewards"] for e in self.episodes]),
             "terminated": np.concatenate([e["terminated"] for e in self.episodes]),
+            # the policy's own successful episodes that are still kept as self-demonstrations read
+            # SOURCE_SELF_DEMO in a batch (training.self_bc_coef clones them); the stored episode
+            # keeps the source it was added with, so an episode that drops out of the latest
+            # ``self_demo_capacity`` reads SOURCE_POLICY again
+            "source": np.concatenate([
+                np.full(len(e["actions"]), SOURCE_SELF_DEMO, dtype=np.int8)
+                if (e["protected"] and not e["demo"]
+                    and not np.isin(e["source"], SCRIPTED_SOURCES).any())
+                else np.asarray(e["source"], dtype=np.int8) for e in self.episodes]),
+            "expert": np.concatenate([e["expert"] for e in self.episodes]),
             "labels": {n: np.concatenate([e["labels"][n] for e in self.episodes])
                        for n in self.label_names},
             "obs_offsets": obs_offsets, "trans_offsets": trans_offsets,
             "episode_of_start": episode_of_start, "start_in_episode": start_in_episode,
         }
+        if self.reward_fn is not None:
+            materials = np.concatenate([e["materials"] for e in self.episodes])
+            self._flat["rewards"] = np.asarray(self.reward_fn(materials), dtype=np.float32).reshape(-1)
         if self.stratify_by is not None or self.demo_fraction > 0:
             phase = np.concatenate([e["phase"] for e in self.episodes])
             start_phase = phase[obs_offsets[episode_of_start] + start_in_episode]
             stratum = phase_stratum(start_phase)
             self._flat["stratum_starts"] = [np.flatnonzero(stratum == g)
                                             for g in range(len(PHASE_STRATA))]
-            is_demo = np.asarray([e["demo"] for e in self.episodes], dtype=bool)
+            # the demonstration quota draws from the scripted demonstrations and the policy's own
+            # successful episodes kept as self-demonstrations alike
+            is_demo = np.asarray([e["demo"] or (e["protected"] and not e["demo"])
+                                  for e in self.episodes], dtype=bool)
             self._flat["demo_starts"] = np.flatnonzero(is_demo[episode_of_start])
         self._dirty = False
+
+    def set_demo_fraction(self, fraction: float) -> None:
+        """A new demonstration quota (the schedule's ramp); the next batch uses it."""
+        if not 0.0 <= float(fraction) <= 1.0:
+            raise ValueError(f"demo fraction must be in [0, 1], got {fraction}")
+        self.demo_fraction = float(fraction)
+        self._dirty = True
+
+    def recompute_rewards(self) -> None:
+        """After a change of coefficients: the next batch uses the new rewards."""
+        self._dirty = True
 
     @property
     def num_valid_starts(self) -> int:
@@ -242,6 +359,8 @@ class EpisodeReplay:
             rewards=tensor(flat["rewards"][tr_idx][..., None]),
             terminated=tensor(flat["terminated"][tr_idx][..., None]),
             labels={n: tensor(flat["labels"][n][tr_idx][..., None]) for n in self.label_names},
+            source=torch.as_tensor(flat["source"][tr_idx].astype(np.int64), device=device),
+            expert=tensor(flat["expert"][tr_idx]),
         )
 
     # ---------------------------------------------------------- save / load --
@@ -263,7 +382,9 @@ class EpisodeReplay:
                      batch_size=state["batch_size"], label_names=state["label_names"])
         for e in state["episodes"]:
             replay.add(e["observations"], e["actions"], e["rewards"], e["terminated"], e["labels"],
-                       phase=e.get("phase"), demo=e.get("demo", False))
+                       phase=e.get("phase"), demo=e.get("demo", False), materials=e.get("materials"),
+                       source=e.get("source"), protected=e.get("protected"), outcome=e.get("outcome", ""),
+                       expert=e.get("expert"))          # replays saved before 2026-11-13: derived
         replay.rng.bit_generator.state = state["rng_state"]
         return replay
 

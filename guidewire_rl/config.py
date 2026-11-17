@@ -27,16 +27,27 @@ def deep_merge(base: Mapping[str, Any], update: Mapping[str, Any]) -> Dict[str, 
 
 
 def apply_override(config: Dict[str, Any], assignment: str) -> None:
-    """``training.total_steps=1000`` (value parsed as YAML)."""
+    """``training.total_steps=1000`` (value parsed as YAML).
+
+    A list of named entries is entered by name: ``env.monitors.phase_detector.thresholds.target_mm=3``
+    reaches the entry of ``env.monitors`` whose ``name`` is ``phase_detector``."""
     if "=" not in assignment:
         raise ValueError(f"Override must look like key.path=value, got {assignment!r}")
     path, raw = assignment.split("=", 1)
     keys = path.strip().split(".")
     node = config
     for key in keys[:-1]:
-        if key not in node or not isinstance(node[key], dict):
+        if isinstance(node, list):
+            named = [item for item in node if isinstance(item, dict) and item.get("name") == key]
+            if len(named) != 1:
+                raise KeyError(f"Override path {path!r}: {len(named)} list entries named {key!r}")
+            node = named[0]
+            continue
+        if key not in node or not isinstance(node[key], (dict, list)):
             raise KeyError(f"Override path {path!r}: {key!r} is not a section")
         node = node[key]
+    if not isinstance(node, dict):
+        raise KeyError(f"Override path {path!r}: ends inside a list, name one of its entries")
     if keys[-1] not in node:
         raise KeyError(f"Override path {path!r}: unknown key {keys[-1]!r}")
     node[keys[-1]] = yaml.safe_load(raw)

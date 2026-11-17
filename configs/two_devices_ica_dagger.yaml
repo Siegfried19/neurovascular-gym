@@ -1,0 +1,112 @@
+# Teacher in shadow (DAgger-style labels; lead 2026-11-13). The same task, observation, action and
+# reward as two_devices_ica.yaml; what changes is where the policy prior's imitation target comes from.
+#
+# Why: with two_devices_ica.yaml the prior imitates the hand-written procedure only on the transitions
+# the procedure itself executed (prefix steps, demonstrations). Measured 2026-11-13: there the gap stays
+# tiny, but once the policy's own rollout leaves the procedure's path (around steps 80-120 the procedure
+# retracts the wire, the failing policies pull the catheter back) nothing tells the prior what to do,
+# only an unreliable critic, and it drifts and jitters.
+#
+# What this config does:
+#   - env.shadow_expert: while the POLICY drives, the hand-written procedure (StagedController) runs
+#     alongside it in the env's process, reset with every episode, and at every step computes from the
+#     simulator's true state the action it would take. That action is not executed, only stored as the
+#     step's imitation target (info["expert_action"] -> replay "expert"; NaN once the procedure has given
+#     up or finished). guidewire_rl/env/two_device/shadow.py.
+#   - training.bc_target: expert: the prior's behaviour cloning (bc_coef 1.0, fading with the
+#     demonstration quota as before) pulls its mean action towards that target on every transition that
+#     has one: the policy's own steps, the demonstrations (target = their action).
+#   - planning.mpc: false: the policy prior acts in training (and in the evaluations); the planner is off.
+#   - start_curriculum: null: every episode from the insertion point, no scripted prefix.
+#   - seed_steps 0 + pretrain_updates 20000: no random-action phase; before the first env step the agent
+#     takes 20 000 ordinary updates on the demonstrations (which therefore must load), so the prior
+#     starts out imitating the procedure; the initial_updates burst is then skipped.
+#   - schedule: two_devices_ica.yaml's, but the demonstrations (and with them the cloning) are ramped
+#     away at 70 % success (pass_rate 0.7; see the run settings below), while the force penalty starts
+#     climbing at 50 % (force_pass_rate 0.5).
+# Follow-up (lead 2026-11-13 evening, after measuring the shadow on the 160k-step policy):
+#   - shadow_expert.sync: the script's stage only moves on its own triggers, so a policy that does the
+#     task differently left it behind (labels "wire back at full speed" with the wire in the carotid);
+#     synced, it is moved forward to the stage the referee's phase implies before every label, and a
+#     label chosen in a stage still behind the phase is dropped (shadow.py, ShadowExpert).
+#   - model.log_std_max -1.6: the policy's std before tanh at most 0.2 (it sat at the cap e^2 = 7.4,
+#     so the executed training action on the script's states was a random +-1).
+#   - policy_mean_bound 2.5 / policy_mean_bound_coef 0.01: a soft bound on the mean before tanh (it
+#     sat at |mu| ~ 20, where no loss on tanh(mu) has a gradient); with the bound, the cloning targets
+#     are clamped to +-tanh(2.5) = +-0.987 (model/agent.py).
+# Run settings (lead 2026-11-13 evening, for round2_dagger_v1):
+#   - demonstrations runs/demos_round2d: 60 episodes of the procedure on seeds 2000-2059 (train targets);
+#   - the periodic evaluation on seeds 5000-5019 (20 episodes): NOT the demonstrations' seeds. Until
+#     now the evaluation seeds (1000-1019) were the demonstrations' seeds;
+#   - the teacher is taken away once the last two evaluations together succeed 70 % of the time
+#     (pass_rate 0.7): the demonstration quota and with it the cloning go to 0 over 100 000 steps under
+#     the guard; the user wants the delivered policy to stand and keep improving without the teacher;
+#   - up to 400 000 steps; the schedule's stop rule ends the run earlier.
+# The numbers are first guesses (lead).
+# Follow-up 2 (lead 2026-11-14, after round2_dagger_v1's evaluation at 100k steps fell to 2/20; work log):
+# the policy stood still after the wire's retraction (all four actions 0 for 700 steps) while the script
+# beside it cycled place / turn / lower on its timers, so the same state got "hook down" (+1) and "hook
+# up" (-1) in turns and the cloning's answer was 0; measured on held-out episodes, the P1 label of the
+# catheter's turn could not be told from the observation (sign right 54 %). Further on (ica) the script
+# read a push the policy did not make as a blocked wire and answered "back off". The teacher now gives
+# answers a policy without memory can copy (ScriptParams, "a procedure a policy without memory can copy"):
+#   - first_place false: after the retraction the hook is turned up where it is (no place stage on the
+#     first try);
+#   - turn_dir -1: the hook always turns the same way round while far from its aim;
+#   - turn_timeout 80 (40): one way round can be the long way (up to 300 degrees, and the hook lags the
+#     base); with 40 steps, 12 of 60 seeds timed out in the first turn, went round a second time (net
+#     turn -620..-714 degrees against -68..-328) and 11 of them then lost the catheter twice;
+#   - stall_needs_push true (shadow only): a stall counts only the steps whose push was executed;
+#   - give_up false (shadow only): the labels never stop.
+#   The demonstrations are the script with first_place false, turn_dir -1 and turn_timeout 80
+#   (round2_dagger_v2: runs/demos_round2e, seeds 2000-2059, the successful episodes).
+# Follow-up 3 (lead 2026-11-14 night, after round2_dagger_v2's 100k steps: evaluations 7, 14, 8, 13 of
+# 20 on the mean action while the training episodes, which sample their action, succeeded 70-80 % of
+# the time; work log). Without the noise the policy stopped right after the catheter was 8 mm into the
+# trunk (P3): all four actions 0 to the end, the script beside it asking for "catheter slowly on in"
+# (0.12 of full speed) the whole time. Two things:
+#   - seat_mm 8 (20) and reseat_mm 20 (8): the wire goes out as soon as the catheter is 8 mm in (the
+#     referee's own P3 line) and the catheter is pulled gently on to 20 mm while the wire works. Before,
+#     the same state (catheter 8-20 mm in, wire behind the hook) got "wire back to 37 mm behind" while
+#     the script was seating and "wire out" once it had seated, a mode the observation does not carry.
+#     The script with these two (and the three above) on seeds 2000-2059: runs/demos_round2f.
+#   - bc_loss smooth_l1 (bc_loss_beta 0.05): the cloning's gap is measured as an absolute value, not a
+#     square. Squared, the pull towards a slow target shrinks with the gap (at 0 against a target of
+#     0.12 it is a quarter of what a 0.5 miss gets) and lost against the critic's gradient, which is
+#     against pulling the catheter back (the follow reward pays for catheter progress); the cloning's
+#     root-mean-square miss sat at 0.1, the size of the slow targets (pull, seat, aim, slow follow).
+extends: two_devices_ica.yaml
+
+run:
+  name: two_devices_ica_dagger
+
+env:
+  shadow_expert: {type: StagedController, sync: true, first_place: false, turn_dir: -1, turn_timeout: 80,
+                  seat_mm: 8.0, reseat_mm: 20.0, stall_needs_push: true, give_up: false}
+
+model:
+  log_std_max: -1.6
+
+planning:
+  mpc: false
+
+training:
+  start_curriculum: null        # null drops the inherited curriculum (config.deep_merge)
+  bc_target: expert
+  bc_coef: 1.0
+  bc_loss: smooth_l1            # the absolute gap (follow-up 3); bc_loss_beta: inside it the gap is squared
+  bc_loss_beta: 0.05
+  seed_steps: 0
+  pretrain_updates: 20000
+  policy_mean_bound: 2.5
+  policy_mean_bound_coef: 0.01
+  demos: {dir: runs/demos_round2f, fraction: 0.25}
+  total_steps: 400000
+  schedule: {pass_rate: 0.7, force_pass_rate: 0.5, demo_ramp_steps: 100000}   # the rest merged from two_devices_ica.yaml
+
+evaluation:
+  seed: 5000
+  episodes: 20
+
+logging:
+  wandb: {tags: [round2, two_devices_ica, dagger]}

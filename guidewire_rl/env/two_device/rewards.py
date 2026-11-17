@@ -1,4 +1,4 @@
-"""Reward terms of the two-device task (todo_list/two_devices_training.md, section 2), one stEVE
+"""Reward terms of the two-device task (todo_list/archive/two_devices_training.md, section 2), one stEVE
 ``Reward`` each, listed one by one under ``env.reward`` (they add up).
 
 All read the referee (``PhaseDetector``); none reads a centerline-keeping term. A step with a
@@ -91,12 +91,36 @@ class _Potential(_PhaseReward):
 
 @register("reward")
 class LeadingTipProgress(_Potential):
-    def __init__(self, phase_detector: PhaseDetector, factor: float = 0.01) -> None:
+    """``ruler``: ``nearest`` (the tip with the shorter path, the whole way) or
+    ``wire_after_trunk`` (the wire's path once its tip is in the trunk or beyond)."""
+
+    def __init__(self, phase_detector: PhaseDetector, factor: float = 0.01,
+                 ruler: str = "nearest") -> None:
         super().__init__(phase_detector, factor)
+        if ruler not in ("nearest", "wire_after_trunk"):
+            raise ValueError(f"ruler must be 'nearest' or 'wire_after_trunk', got {ruler!r}")
+        self.ruler = ruler
 
     def potential(self, state: PhaseState) -> float:
         wire, catheter, _ = state.progress_paths()
+        if self.ruler == "wire_after_trunk" and state.depth_bct_w >= 0.0:
+            return -wire
         return -min(wire, catheter)
+
+
+@register("reward")
+class ZeroReward(Reward):
+    """Always 0: the stEVE reward slot of a config whose reward is the formula (``reward_formula``,
+    computed by the env after the labels; reward_formula.py)."""
+
+    def __init__(self) -> None:
+        self.reward = 0.0
+
+    def step(self) -> None:
+        self.reward = 0.0
+
+    def reset(self, episode_nr: int = 0) -> None:
+        self.reward = 0.0
 
 
 @register("reward")

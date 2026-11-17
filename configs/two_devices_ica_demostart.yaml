@@ -1,0 +1,60 @@
+# Round two, "demonstrations as starting points" (user 2026-11-12, work log 19:26; the literature
+# review's recommendation, docs/research/血管导航策略教法文献调研.md). The fourth of the four ways to help
+# the policy past what trial and error does not reach (docs/training_framework.md, "四种训练方法"):
+#
+#   two_devices_ica_nodemo.yaml      nothing: every episode from the insertion point
+#   two_devices_ica.yaml             the two crutches: a scripted prefix every episode + demonstrations
+#   two_devices_ica_selfstart.yaml   starts = states the policy reached itself
+#   two_devices_ica_demostart.yaml   starts = states saved along the scripted demonstrations (this file)
+#
+# Everything is two_devices_ica_selfstart.yaml (the plain progress reward, env.start FromSnapshot, the
+# start curriculum drawing saved states: 30 % of the episodes from the insertion point, the frontier
+# walking back from the last grid when starts there succeed half of the time); these differ:
+#   - the saved states come from a fixed library made once from the scripted demonstrations (one state
+#     per new 10 % progress grid of every demonstration, the three the script gave up on included: user
+#     2026-11-13 "也放进开局池"); nothing is added or deleted during
+#     training, the envs save nothing. It covers every grid from the first episode, so the curriculum
+#     starts at the last grid without waiting for the policy to get there by itself.
+#   - a restored episode keeps the steps its saved state had taken towards the 800-step limit
+#     (env.start count_saved_steps; user 2026-11-13, work log 2026-11-12 23:27): from a state saved at
+#     step 419 it has 381 steps left, as if it had walked there itself (selfstart gives a restored
+#     episode the full 800).
+#   - the demonstrations are in the replay, at least 25 % of every batch (user 2026-11-13 00:57; shared
+#     with the policy's own successful episodes, kept as self-demonstrations, 500). Since 2026-11-13
+#     07:35 the policy prior ALSO imitates the demonstrations' actions here: training.bc_coef 1.0 is in
+#     two_devices_ica.yaml and inherited down the chain (as is policy_smooth_coef). Whether this method
+#     should carry the imitation is not decided by the user yet; set bc_coef: 0 here to switch it off.
+#   - the schedule of two_devices_ica.yaml (user 2026-11-12 23:22: "按照现有的日程"): curriculum ->
+#     the quota ramped from 25 % to 0 over 150 000 steps once the frontier is at the insertion point and
+#     the last two evaluations succeed half of the time -> wrap-up until 5 evaluations without a new best;
+#     the guard on the ramp. The ladder (the arch-ruler hint for a stuck grid) is off and the force
+#     penalty starts light, as in two_devices_ica.yaml (user 2026-11-13 afternoon).
+# The script is not in the training loop. Make the demonstrations and the library first (one pass, about
+# 20 episodes of the hand-written procedure on this vessel):
+#
+#   conda run --no-capture-output -n guidewire_rl python scripts/record_demos.py \
+#       --config configs/two_devices_ica_demostart.yaml --seeds 1000-1019 --workers 20 --episode-timeout 1800 \
+#       --out runs/demos_round2c --starts runs/demos_round2c/starts --starts-from-failed
+#
+# (2026-11-13: 17 / 20 successful, bit for bit the demonstrations of 2026-11-12; the library holds 20
+# states in grids 1-7 and 17 in grids 8-10, 191 in all: the three given-up demonstrations reached grid 7.
+# About 11 minutes with 20 workers. two_devices_ica.yaml uses the same demonstrations.)
+extends: two_devices_ica_selfstart.yaml
+
+env:
+  start: {type: FromSnapshot, fraction: 0.0, max_phase: 9, wire_mm: 40.0, count_saved_steps: true}
+
+training:
+  start_curriculum: {supply: demos, library: runs/demos_round2c/starts}
+  demos: {dir: runs/demos_round2c, fraction: 0.25}
+  self_demos: {enabled: true}
+  # the schedule (guidewire_rl/train/schedule.py), the values of two_devices_ica.yaml (two_devices_ica_nodemo
+  # sets it to null, so it is written out in full here)
+  # (2026-11-13 afternoon, kept equal to two_devices_ica.yaml: ladder off, the force penalty light first)
+  schedule: {demo_ramp_steps: 150000, pass_rate: 0.5, guard_drop: 0.15, guard_floor: 0.30, hold_evals: 3,
+             stop_patience: 5, hint_ramp: false, hint_ramp_steps: 200000, ladder: false,
+             stuck_rate: 0.10, next_rate: 0.50, stuck_evals: 3, stuck_steps: 200000, level_steps: 200000,
+             force_start: 0.25, force_ramp_steps: 150000}
+
+logging:
+  wandb: {tags: [round2, two_devices_ica, demo_start]}

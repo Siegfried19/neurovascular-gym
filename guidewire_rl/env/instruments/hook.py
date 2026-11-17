@@ -8,7 +8,7 @@ The lab's numbers (its ``HOOK`` dict and ``hook_instrument()``), kept as they ar
   - shaft (``StraightSection``, 0.1 collision edges per mm) makes up the rest of ``length`` (450 mm);
   - both: outer 2.0 mm, inner 1.0 mm, E 4 GPa (4e3 MPa), Poisson 0.49, density 5e-6 (stEVE's
     default for its catheters; the lab uses it too, and at the real plastic density two devices
-    in one scene go numerically unstable: todo_list/two_devices_training.md section 0).
+    in one scene go numerically unstable: todo_list/archive/two_devices_training.md section 0).
 
 They are simulation parameters, not a product (the lab's own words). The shaft comes first and the
 head is one mesh section, as stEVE builds its ``Simmons4Bends`` (docs/simulator_changes.md,

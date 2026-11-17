@@ -75,7 +75,19 @@ PHANTOMS: Dict[str, Dict[str, Any]] = {
                  "As the inscribed spheres version, with the right arm."),
         "vessel_tree": {"type": "BiroPhantomArch", "version": "spheres"},
     },
+    # no vessel: the instruments alone in empty space, live (parts/bench.py)
+    "bench": {
+        "label": ("无血管：器械仿真（空中）", "no vessel: instrument bench (in empty space)"),
+        "note": ("没有血管，只有导丝和导管在空中，实时推、转：看导管的弯、导丝穿过导管。器械按下面两个菜单选，"
+                 "物理（物理步、预判距离、质量）用所选设置的；观测、奖励、目标都不用。背景格子 1 cm 一格。",
+                 "No vessel: the guidewire and the catheter alone in empty space, pushed and turned live, to see "
+                 "the catheter's curve and the wire passing through it. The devices come from the two menus below, "
+                 "the physics (step, alarm distance, masses) from the chosen setting; observation, reward and target "
+                 "are not used. The background grid has 1 cm cells."),
+        "bench": True,
+    },
 }
+NO_CATHETER = "none"                 # the catheter menu's "no catheter" (instrument bench only)
 DEFAULT_PHANTOM, DEFAULT_SETTING, DEFAULT_FRICTION = "rebuilt_cut", "phantom_g13", 0.1
 
 # instrument settings (器械设置): the friction is chosen apart (``FRICTIONS``), so configs that differ only
@@ -89,9 +101,18 @@ SETTING_TEXT: Dict[str, Pair] = {
                            "guidewire + hook catheter: round 1 (default mass, 6 ms), target in the right CCA"),
     "two_devices_real_mass": ("导丝 + 钩形导管：真实质量（2 ms，各按自己的半径碰墙），目标右颈总",
                               "guidewire + hook catheter: real mass (2 ms, each with its own radius), target in the right CCA"),
-    "two_devices_ica": ("导丝 + 钩形导管：真实质量，目标右颈内（分叉上 20–40 mm，手写推法 11-06 调的那套）",
-                        "guidewire + hook catheter: real mass, target in the right ICA (20-40 mm past the split; "
-                        "the 11-06 scripted procedure's)"),
+    "two_devices_ica": ("导丝 + 钩形导管：第二轮配置，目标右颈内（分叉上 35–45 mm；两档终点、公式奖励、无规则壳）",
+                        "guidewire + hook catheter: round-two config, target in the right ICA (35-45 mm past the "
+                        "split; two-tier finish, formula reward, rule-free shell)"),
+    # the other three ways to train round two (docs/training_framework.md, "四种训练方法") and the tried variant
+    "two_devices_ica_nodemo": ("第二轮 · 不带拐棍（每局从插入点起，无示范）",
+                               "round two · no crutches (every episode from the insertion point, no demonstrations)"),
+    "two_devices_ica_nodemo_best": ("第二轮 · 不带拐棍 + 只奖励新进展（试过、失败，留作对照）",
+                                    "round two · no crutches + only new progress pays (tried, failed; kept for reference)"),
+    "two_devices_ica_selfstart": ("第二轮 · 自己的局当起点（起点库来自策略自己走到过的状态）",
+                                  "round two · the policy's own states as starting points"),
+    "two_devices_ica_demostart": ("第二轮 · 示范当起点（起点库来自手写推法的局）",
+                                  "round two · states saved along the scripted demonstrations as starting points"),
 }
 FRICTIONS: Dict[float, Pair] = {
     0.001: ("0.001（G13 原值）", "0.001 (G13's value)"),
@@ -106,9 +127,12 @@ class Phantom:
     note: Pair
     vessel_tree: Optional[Dict[str, Any]] = None     # kind "sim"
     shape: Optional[Dict[str, Path]] = None          # kind "shape"
+    bench: bool = False                              # kind "bench": no vessel, instruments in empty space
 
     @property
     def kind(self) -> str:
+        if self.bench:
+            return "bench"
         return "shape" if self.shape is not None else "sim"
 
 
@@ -128,8 +152,38 @@ def phantoms(specs: Mapping[str, Dict[str, Any]] = PHANTOMS) -> List[Phantom]:
         if shape is not None and not all(Path(p).exists() for p in shape.values()):
             continue                                    # data not on this machine
         out.append(Phantom(key=key, label=tuple(spec["label"]), note=tuple(spec["note"]),
-                           vessel_tree=copy.deepcopy(spec.get("vessel_tree")), shape=shape))
+                           vessel_tree=copy.deepcopy(spec.get("vessel_tree")), shape=shape,
+                           bench=bool(spec.get("bench", False))))
     return out
+
+
+def instrument_count(setting: Setting) -> int:
+    """How many instruments the setting's config has (1: guidewire only, 2: guidewire + catheter)."""
+    from guidewire_rl.config import load_config
+
+    return len(load_config(setting.config_path)["env"]["scene"].get("instruments") or [])
+
+
+def with_devices(config: Mapping[str, Any], phantom: Phantom, wire: Optional[str] = None,
+                 catheter: Optional[str] = None) -> Dict[str, Any]:
+    """The config with the devices picked in the menus (keys of ``guidewire_rl.env.instruments.catalog``;
+    None keeps the setting's own). In a vessel the devices are only swapped, never added or removed
+    (the task's observation and action are built for that many); on the instrument bench a catheter
+    can be added to a guidewire-only setting or taken away (``NO_CATHETER``)."""
+    from guidewire_rl.env.instruments import catalog
+
+    out = copy.deepcopy(dict(config))
+    instruments = out["env"]["scene"]["instruments"]
+    if phantom.kind != "bench":
+        if catheter == NO_CATHETER or len(instruments) < 2:
+            catheter = None
+    elif catheter == NO_CATHETER:
+        del instruments[1:]
+        catheter = None
+    elif catheter is not None and len(instruments) < 2:
+        instruments.append(catalog.product(catheter).instrument_spec())
+        catheter = None
+    return catalog.with_products(out, wire, catheter)
 
 
 def _first_comment(path: Path, limit: int = 220) -> str:

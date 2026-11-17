@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import torch
 
 from guidewire_rl.train.replay import EpisodeReplay
 
@@ -84,6 +85,50 @@ def test_state_round_trip_keeps_data_and_random_stream():
     copy = EpisodeReplay.from_state(replay.state_dict())
     a, b = replay.sample(), copy.sample()
     assert (a.observations == b.observations).all() and (a.labels["force"] == b.labels["force"]).all()
+
+
+def test_expert_targets_ride_along_and_old_replays_derive_them():
+    """DAgger-style labels (2026-11-13): each transition's expert target (NaN = none) is stored,
+    sampled with its transition and saved; on scripted steps (prefix, demo) it is the action whatever
+    was given; replays saved before it existed load with exactly that (action on scripted steps, NaN
+    elsewhere)."""
+    from guidewire_rl.train.replay import SOURCE_DEMO, SOURCE_POLICY, SOURCE_PREFIX
+    replay = make_replay(batch_size=256)
+    obs, act, rew, term, labels = make_episode(0, 8)
+    given = np.full((8, 2), np.nan, np.float32)
+    given[:5] = [[0.25, -0.5]] * 5                        # the shadow expert's targets, none on the last 3
+    source = np.array([SOURCE_PREFIX] * 2 + [SOURCE_POLICY] * 6, np.int8)
+    replay.add(obs, act, rew, term, labels, source=source, expert=given)
+    replay.add(*make_episode(1, 6), demo=True)            # a demonstration: target = its action
+    replay.add(*make_episode(2, 6))                        # the policy's, no expert: no target
+    first, demo, plain = (e["expert"] for e in replay.episodes)
+    np.testing.assert_array_equal(first[:2], act[:2])      # prefix steps: the executed action
+    np.testing.assert_array_equal(first[2:5], given[2:5])
+    assert np.isnan(first[5:]).all() and first.dtype == np.float32
+    np.testing.assert_array_equal(demo, replay.episodes[1]["actions"])
+    assert np.isnan(plain).all()
+    batch = replay.sample()
+    assert batch.expert.shape == batch.actions.shape == (3, 256, 2)
+    # every sampled target is its own transition's (episode / step encoded in the action)
+    finite = torch.isfinite(batch.expert).all(dim=-1)
+    is_scripted = (batch.actions[..., 0] == 1) | ((batch.actions[..., 0] == 0) & (batch.actions[..., 1] < 2))
+    assert torch.equal(batch.expert[is_scripted], batch.actions[is_scripted])
+    shadow = finite & ~is_scripted
+    assert shadow.any() and torch.all(batch.expert[shadow] == torch.tensor([0.25, -0.5]))
+    assert not (finite & (batch.actions[..., 0] == 2)).any()
+    with pytest.raises(ValueError):
+        replay.add(*make_episode(3, 5), expert=np.zeros((4, 2)))
+    # saved and loaded; a replay saved before the field existed derives it
+    again = EpisodeReplay.from_state(replay.state_dict())
+    for a, b in zip(replay.episodes, again.episodes):
+        np.testing.assert_array_equal(a["expert"], b["expert"])
+    old = replay.state_dict()
+    old["episodes"] = [{k: v for k, v in e.items() if k != "expert"} for e in old["episodes"]]
+    derived = EpisodeReplay.from_state(old)
+    np.testing.assert_array_equal(derived.episodes[0]["expert"][:2], act[:2])
+    assert np.isnan(derived.episodes[0]["expert"][2:]).all()
+    np.testing.assert_array_equal(derived.episodes[1]["expert"], replay.episodes[1]["actions"])
+    assert derived.episodes[1]["source"].tolist() == [SOURCE_DEMO] * 6
 
 
 @pytest.mark.checkpoint

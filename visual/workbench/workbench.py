@@ -34,24 +34,27 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(1, str(CODE))                            # guidewire_rl, simulator_modifications from there
 
 from parts import keyboard, parameters, scripted  # noqa: E402
+from parts.bench import BENCH_KEY  # noqa: E402
 from parts.body import BodyLayer  # noqa: E402
-from parts.environments import (DEFAULT_FRICTION, DEFAULT_PHANTOM, DEFAULT_SETTING, FRICTIONS, Phantom,  # noqa: E402
-                                Setting, build_config, compatible, find_setting, friction_of, locate, phantoms,
-                                run_config_of, settings)
+from parts.junctions import JunctionLayer  # noqa: E402
+from parts.environments import (DEFAULT_FRICTION, DEFAULT_PHANTOM, DEFAULT_SETTING, FRICTIONS, NO_CATHETER,  # noqa: E402
+                                Phantom, Setting, build_config, compatible, find_setting, friction_of,
+                                instrument_count, locate, phantoms, run_config_of, settings, with_devices)
 from parts.frame import EpisodeLog, Frame  # noqa: E402
 from parts.i18n import LANGS, other, pick, policy_text, tr  # noqa: E402
 from parts.instrument import instruments_html  # noqa: E402
 from parts.plots import PlotPanel  # noqa: E402
 from parts.policies import (CheckpointPolicy, Policy, checkpoint_label, discover_checkpoints,  # noqa: E402
                             policy_menu)
-from parts.scene import (CenterlineLayer, ForceArrowLayer, RadiusTubeLayer, TargetLayer,  # noqa: E402
-                         TrackedPointsLayer, TrailLayer, VesselLayer, WireLayer, apply_camera, camera_pose)
+from parts.scene import (BenchGridLayer, CenterlineLayer, ForceArrowLayer, RadiusTubeLayer,  # noqa: E402
+                         TargetLayer, TrackedPointsLayer, TrailLayer, VesselLayer, WireLayer, apply_camera,
+                         camera_pose)
 from parts.text import action_html, force_html, status_html  # noqa: E402
 from parts.xray import CONTRAST_LOOK, LIGHT, WIRE_DARK, XrayMode, visible_in_xray  # noqa: E402
 
 VIEWS = ("fluoro", "side", "tip")   # camera presets; button text is tr("view_<preset>")
 LAYERS = ("vessel", "body", "centerlines", "other_centerlines", "radius_tubes", "wire", "trail", "target",
-          "tracked", "force")
+          "junctions", "tracked", "force")
 LAYER_DEFAULTS = {"other_centerlines": False, "radius_tubes": False, "tracked": False}
 Menu = Dict[str, Callable[[], Policy]]
 Configure = Callable[[Phantom, Setting], Dict]          # (phantom, setting) -> environment config
@@ -61,9 +64,9 @@ Opener = Callable[[Phantom, Setting, Dict], Tuple[object, Menu]]   # ... + final
 class Workbench:
     def __init__(self, source, *, menu: Menu, initial_policy: Optional[str], port: int, record_dir: Path,
                  seed: int, live: bool, play: bool = False, speed: float = 7.5, lang: str = "zh",
-                 phantom_list: Sequence[Phantom] = (), setting_list: Sequence[Setting] = (),
+                 auto_next: bool = False, phantom_list: Sequence[Phantom] = (), setting_list: Sequence[Setting] = (),
                  phantom_key: Optional[str] = None, setting_key: Optional[str] = None,
-                 friction: Optional[float] = None,
+                 friction: Optional[float] = None, devices: Optional[Dict[str, Optional[str]]] = None,
                  configure: Optional[Configure] = None, opener: Optional[Opener] = None) -> None:
         import viser
 
@@ -73,11 +76,17 @@ class Workbench:
         self.phantoms, self.settings_list = list(phantom_list), list(setting_list)
         self.phantom_key, self.setting_key = phantom_key, setting_key
         self.friction = friction                     # chosen apart from the setting; None = the setting's own
+        # guidewire / catheter picked apart from the setting (catalog keys); None = the setting's own
+        self.devices: Dict[str, Optional[str]] = {"wire": None, "catheter": None}
+        self.devices.update(devices or {})
         self.configure, self.opener = configure, opener
         self.param_base: Optional[Dict] = None      # the setting's own values (stored units)
         self.param_values: Optional[Dict] = None    # the values in effect
         self.record_dir, self.next_seed = Path(record_dir), int(seed)
         self._initial_speed = float(min(max(speed, 1.0), 30.0))
+        # off by default: an episode's last frame (success or not) stays up until the user restarts
+        # (user 2026-11-13: the auto restart wiped the catheter's final push past the split)
+        self._initial_auto_next = bool(auto_next)
         self.lang = lang
         self.lock = threading.RLock()
         self.server = viser.ViserServer(port=port, label=tr("title", lang))
@@ -89,6 +98,7 @@ class Workbench:
 
         # what the GUI asks the loop to do
         self.playing = bool(play) and (self.live or bool(getattr(source, "can_run", False)))   # --play: replays too
+        self._play_on_open = bool(play)          # --play also for the environment opened at start
         self.step_once = False
         self.reset_requested = False
         self.pending_policy: Optional[str] = initial_policy if self.live else None
@@ -121,11 +131,13 @@ class Workbench:
     def _build_scene(self) -> None:
         s = self.server
         self.layers = {
-            "vessel": VesselLayer(s), "body": BodyLayer(s), "centerlines": CenterlineLayer(s),
+            "vessel": VesselLayer(s), "body": BodyLayer(s), "junctions": JunctionLayer(s),
+            "centerlines": CenterlineLayer(s),
             "other_centerlines": CenterlineLayer(s, "/other_centerlines", task=False),
             "radius_tubes": RadiusTubeLayer(s), "wire": WireLayer(s), "trail": TrailLayer(s),
             "target": TargetLayer(s), "tracked": TrackedPointsLayer(s), "force": ForceArrowLayer(s),
         }
+        self.grid = BenchGridLayer(s)          # only on the instrument bench; not a layer one switches
 
     def _settings(self) -> Dict:
         """Everything the panel holds, to carry over a rebuild."""
@@ -175,7 +187,7 @@ class Workbench:
             row.on_click(lambda e: self._on_row(self._row[e.target.value]))
             self.speed = gui.add_slider(t("speed"), min=1.0, max=100.0, step=0.5,
                                         initial_value=keep.get("speed", self._initial_speed), hint=t("speed_hint"))
-            self.auto_next = gui.add_checkbox(t("auto_next"), initial_value=keep.get("auto_next", True))
+            self.auto_next = gui.add_checkbox(t("auto_next"), initial_value=keep.get("auto_next", self._initial_auto_next))
             self.seed_in = gui.add_number(t("next_seed"), initial_value=keep.get("seed", self.next_seed), step=1,
                                           hint=t("next_seed_hint"))
             self.scrub = gui.add_slider(t("scrub"), min=0, max=1, step=1, initial_value=0, hint=t("scrub_hint"))
@@ -236,19 +248,25 @@ class Workbench:
         lang = self.lang
         phantom, setting = self._phantom() or self.phantoms[0], self._setting() or self.settings_list[0]
         with gui.add_folder(t("environment")):
+            # what each choice is: in the menu's hover text, not under it (user 2026-11-12)
             self._phantom_keys = {pick(p.label, lang): p.key for p in self.phantoms}
+            note = pick(phantom.note, lang) + (f"\n{t('shape_only')}" if phantom.kind == "shape" else "")
             self.phantom_dd = gui.add_dropdown(t("phantom_pick"), options=list(self._phantom_keys),
-                                               initial_value=pick(phantom.label, lang), hint=t("env_hint"))
+                                               initial_value=pick(phantom.label, lang),
+                                               hint=f"{note}\n\n{t('env_hint')}")
             self.phantom_dd.on_update(lambda _: self._ask_env(phantom=self._phantom_keys[self.phantom_dd.value]))
-            extra = "" if phantom.kind == "sim" else f"<br><b>{t('shape_only')}</b>"
-            gui.add_html(f"<small style='opacity:.7'>{pick(phantom.note, lang)}{extra}</small>")
             self._setting_keys = {pick(s.label, lang): s.key for s in self.settings_list}
+            also = (f"\n{t('setting_also', names=', '.join(setting.also))}" if setting.also else "")
+            note = f"{setting.config_path.name}: {pick(setting.note, lang)}{also}"
             self.setting_dd = gui.add_dropdown(t("setting_pick"), options=list(self._setting_keys),
-                                               initial_value=pick(setting.label, lang), hint=t("setting_hint"))
+                                               initial_value=pick(setting.label, lang),
+                                               hint=f"{note}\n\n{t('setting_hint')}")
             self.setting_dd.on_update(lambda _: self._ask_env(setting=self._setting_keys[self.setting_dd.value]))
-            also = (f"<br>{t('setting_also', names=', '.join(setting.also))}" if setting.also else "")
-            gui.add_html(f"<small style='opacity:.7'>{setting.config_path.name}: {pick(setting.note, lang)}"
-                         f"{also}</small>")
+            if phantom.kind != "shape":
+                self._build_device_menus(gui, t, phantom, setting)
+            if phantom.kind == "bench":                     # no wall to rub on
+                self.friction_dd = None
+                return
             current = self.friction if self.friction is not None else (
                 self.param_values or {}).get("friction", DEFAULT_FRICTION)
             choices = dict(FRICTIONS)
@@ -260,6 +278,39 @@ class Workbench:
                                                 initial_value=shown, hint=t("friction_hint"))
             self.friction_dd.on_update(lambda _: self._ask_friction(self._friction_keys[self.friction_dd.value]))
 
+    def _build_device_menus(self, gui, t, phantom: Phantom, setting: Setting) -> None:
+        """Guidewire and catheter menus: the setting's own or a modelled real device
+        (``guidewire_rl.env.instruments.catalog``; where its numbers come from is the menu's hover
+        text). In a vessel a catheter menu only when the setting has one; on the bench also "no catheter"."""
+        from guidewire_rl.env.instruments import catalog
+
+        lang = self.lang
+        count = instrument_count(setting)
+        own = t("device_setting")
+        self._device_keys: Dict[str, Dict[str, Optional[str]]] = {}
+        self.device_dd: Dict[str, object] = {}
+        kinds = [("wire", catalog.WIRE)]
+        if count >= 2 or phantom.kind == "bench":
+            kinds.append(("catheter", catalog.CATHETER))
+        for slot, kind in kinds:
+            if slot == "wire" or count >= 2:
+                options: Dict[str, Optional[str]] = {own: None}
+            else:                                           # bench, guidewire-only setting: none is its own
+                options = {t("no_catheter"): None}
+            options.update({pick(p.label, lang): p.key for p in catalog.products(kind)})
+            if slot == "catheter" and phantom.kind == "bench" and count >= 2:
+                options[t("no_catheter")] = NO_CATHETER
+            chosen = self.devices.get(slot)
+            if chosen not in options.values():
+                chosen = next(iter(options.values()))
+            shown = next(label for label, key in options.items() if key == chosen)
+            self._device_keys[slot] = options
+            note = "" if chosen in (None, NO_CATHETER) else pick(catalog.product(chosen).note, lang) + "\n\n"
+            dd = gui.add_dropdown(t(f"{slot}_pick"), options=list(options), initial_value=shown,
+                                  hint=note + t("devices_hint"))
+            dd.on_update(lambda _, slot=slot: self._ask_device(slot, self._device_keys[slot][self.device_dd[slot].value]))
+            self.device_dd[slot] = dd
+
     def _build_parameter_tab(self, gui, t) -> None:
         """The simulation numbers of the open environment, editable; applying rebuilds it."""
         self.param_inputs = {}
@@ -270,6 +321,9 @@ class Workbench:
         edited = set(parameters.changed(self.param_base, self.param_values))
         for p in parameters.PARAMS:
             label = pick(p.label, lang) + (f" ({p.unit})" if p.unit else "") + (t("edited") if p.key in edited else "")
+            if not parameters.is_number(p, self.param_values[p.key]):     # a word, e.g. per_target: shown only
+                gui.add_text(label, initial_value=str(self.param_values[p.key]), disabled=True)
+                continue
             value = parameters.shown(p, self.param_values[p.key])
             disabled = phantom is not None and phantom.kind == "shape" and not p.view_only_too
             if p.vector:
@@ -314,7 +368,8 @@ class Workbench:
         if not apply:
             self.pending_env = (self.phantom_key, self.setting_key, None)
             return
-        values = {p.key: parameters.stored(p, self.param_inputs[p.key].value) for p in parameters.PARAMS}
+        values = {p.key: (parameters.stored(p, self.param_inputs[p.key].value) if p.key in self.param_inputs
+                          else self.param_values[p.key]) for p in parameters.PARAMS}
         self.friction = float(values["friction"])      # the friction menu follows the parameter
         self.pending_env = (self.phantom_key, self.setting_key, values)
 
@@ -325,6 +380,14 @@ class Workbench:
         self.friction = float(friction)
         values = None if self.param_values is None else dict(self.param_values, friction=self.friction)
         self.pending_env = (self.phantom_key, self.setting_key, values)
+
+    def _ask_device(self, slot: str, key: Optional[str]) -> None:
+        """Another guidewire or catheter: the environment rebuilt, the parameters back to the
+        setting's own (the masses belong to the device), the friction kept."""
+        if self.devices.get(slot) == key and not self.env_failed:
+            return
+        self.devices[slot] = key
+        self.pending_env = (self.phantom_key, self.setting_key, None)
 
     def _ask_rebuild(self, why: str) -> None:
         self.rebuild_requested = why
@@ -440,6 +503,8 @@ class Workbench:
             config = self.configure(phantom, setting)
             if self.friction is not None:                  # chosen apart from the setting
                 config = parameters.apply(config, {"friction": self.friction})
+            if any(self.devices.values()) and config.get("env", {}).get("scene", {}).get("instruments"):
+                config = with_devices(config, phantom, self.devices.get("wire"), self.devices.get("catheter"))
             base = parameters.read(config)
             values = base if values is None else values
             if parameters.changed(base, values):
@@ -474,6 +539,7 @@ class Workbench:
         self._build_gui(self._kept)
         if self.live:
             self._load_policy(label)
+            self.playing, self._play_on_open = self.playing or self._play_on_open, False
         else:
             self.state = "view_only"
             self._reset()
@@ -567,8 +633,10 @@ class Workbench:
         self.frame = frame
         if info.vessel_key != self._vessel_key:
             self._vessel_key = info.vessel_key
-            for key in ("vessel", "centerlines", "other_centerlines", "radius_tubes", "target", "body"):
+            for key in ("vessel", "centerlines", "other_centerlines", "radius_tubes", "target", "body",
+                        "junctions"):
                 self.layers[key].set_scene(info)
+            self.grid.set_scene(info)
             clients = list(self.server.get_clients().values())
             if self.xray.on:
                 self.xray.enter(info, clients)
@@ -578,8 +646,10 @@ class Workbench:
             self._apply_display()
         with self.server.atomic():
             self._draw_wire(frame)
-            self.layers["trail"].update(np.array([f.tip_mm for f in log.frames[: index + 1]
-                                                  if f.tip_mm is not None]).reshape(-1, 3))
+            # no trail on the instrument bench: the leading tip changes device there, the path is noise
+            trail = [] if info.vessel_key == BENCH_KEY else [f.tip_mm for f in log.frames[: index + 1]
+                                                               if f.tip_mm is not None]
+            self.layers["trail"].update(np.array(trail).reshape(-1, 3))
             self.layers["target"].update(frame)
             self.layers["tracked"].update(frame, info)
             self.layers["force"].update(frame)
@@ -628,6 +698,12 @@ def make_opener(args) -> Tuple[Configure, Opener]:
         if phantom.kind == "shape":
             angle = parameters.read(config)["carm"]
             return ShapeSource(phantom.shape["mesh"], phantom.shape["centerlines"], angle, description=name), {}
+        if phantom.kind == "bench":
+            from parts.bench import BenchSource, bench_menu
+            types = " + ".join(str(s.get("type")) for s in config["env"]["scene"]["instruments"])
+            source = BenchSource(config, description=f"{name} · {types}")
+            keys = {keyboard.LABEL: lambda: keyboard.KeyboardPolicy(source.action_dim, keyboard.KEY_STATE)}
+            return source, bench_menu(source, keys)
         source = LiveEnvSource(config, description=name)
         found = [p for p in discover_checkpoints(args.runs)
                  if p.resolve() not in {c.resolve() for c in explicit}]
@@ -639,9 +715,7 @@ def make_opener(args) -> Tuple[Configure, Opener]:
                                     action_dim=source.action_dim, episode_length=source.env.max_episode_steps,
                                     device=args.device)
         by_hand = {keyboard.LABEL: lambda: keyboard.KeyboardPolicy(source.action_dim, keyboard.KEY_STATE)}
-        staged = scripted.staged_factory(source)
-        if staged is not None:
-            by_hand[scripted.LABEL] = staged
+        by_hand.update(scripted.staged_factories(source))
         return source, policy_menu(source.action_dim, explicit + fitting, make, extra=by_hand)
     return configure, opener
 
@@ -663,15 +737,19 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--play", action="store_true", help="start playing right away")
     parser.add_argument("--speed", type=float, default=7.5, help="steps per second to start with (1-100)")
+    parser.add_argument("--auto-next", action="store_true",
+                        help="start the next episode by itself once one ends (default: stop on the last frame)")
     parser.add_argument("--record-dir", default=str(ROOT / "runs" / "workbench"))
     parser.add_argument("--lang", choices=LANGS, default="zh", help="interface language to start with")
+    parser.add_argument("--wire", help="guidewire to put in (a key of guidewire_rl.env.instruments.catalog)")
+    parser.add_argument("--catheter", help="catheter to put in (a catalog key; 'none' on the bench)")
     args = parser.parse_args()
 
     if args.replay:
         from parts.sources import ReplaySource
         bench = Workbench(ReplaySource(args.replay), menu={}, initial_policy=None, port=args.port,
                           record_dir=Path(args.record_dir), seed=args.seed, live=False, play=args.play,
-                          speed=args.speed, lang=args.lang)
+                          speed=args.speed, lang=args.lang, auto_next=args.auto_next)
     else:
         phantom_list, setting_list = phantoms(), settings()
         phantom_key = setting_key = None
@@ -691,8 +769,10 @@ def main() -> None:
         initial = args.policy or (checkpoint_label(Path(args.checkpoint[0])) if args.checkpoint else None)
         bench = Workbench(None, menu={}, initial_policy=initial or "随机动作", port=args.port,
                           record_dir=Path(args.record_dir), seed=args.seed, live=True, play=args.play,
-                          speed=args.speed, lang=args.lang, phantom_list=phantom_list, setting_list=setting_list,
+                          speed=args.speed, lang=args.lang, auto_next=args.auto_next,
+                          phantom_list=phantom_list, setting_list=setting_list,
                           phantom_key=phantom_key, setting_key=setting_key, friction=friction,
+                          devices={"wire": args.wire, "catheter": args.catheter},
                           configure=configure, opener=opener)
     try:
         bench.run()

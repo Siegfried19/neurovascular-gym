@@ -2,7 +2,14 @@
 
 Reinforcement learning for navigating a guidewire and a catheter from the descending aorta into the right internal carotid artery, inside the BIRO lab's neurovascular phantom (a physical model of the head-and-neck vessels). The simulator is SOFA + BeamAdapter (with our patches) + stEVE (upstream, unmodified) + this repository's fixes on top of them. The algorithm is TD-MPC2 (a learned world model with planning in latent space); the world model and planner are copied from Wilson Wan's contact-aware TD-MPC2. One experiment = one YAML file in `configs/`.
 
-This README is written for people and for coding agents (Claude Code, Codex) alike: paths, commands and the things that must not be touched are spelled out. Read it to the end before changing anything.
+Paths, commands and the things that must not be touched are spelled out. Read it to the end before changing anything.
+
+## Where the work stands (2026-11-17)
+
+- **The task is solved in simulation on this phantom**: from the insertion point in the descending aorta, over the arch, into the brachiocephalic trunk and the right common carotid; the guidewire reaches a target in the right internal carotid and the catheter follows past the carotid bifurcation, in one episode of at most 800 steps (0.133 s each). The policy sees only what a real setup has: 2-D positions of the two tips and shapes in the image, target and waypoints, insertion lengths, rotations, its last actions. No vessel wall, no forces, no 3-D.
+- **Result of the released policy** (see "The released policy"): 93 / 100 and 92 / 100 completed episodes on two batches of unseen seeds, on target points held out from training, acting with the policy network's mean action (no exploration noise, no planner, no scripted controller).
+- **How it was trained** (`configs/two_devices_ica_dagger.yaml`): the policy drives; a hand-written procedure (the "teacher", `guidewire_rl/env/two_device/script.py`) runs beside it in the same simulation and labels every step with what it would do; the policy network imitates those labels while TD-MPC2 learns as usual. Once the evaluations pass, the teacher is faded out and training goes on by reinforcement learning alone. The released policy comes from that last part: the teacher was gone for about 230 000 steps.
+- **What does not work yet**: plain reinforcement learning from the insertion point without a teacher never got past the arch (five variants, all 0 in evaluation); training on without the teacher is not stable (the noise-free behaviour can collapse for a while and come back, so every checkpoint must be evaluated without noise before use); other destinations (left carotid) and randomized vessels are work in progress and not part of this repository's results.
 
 ## What is in the repository
 
@@ -10,21 +17,21 @@ This README is written for people and for coding agents (Claude Code, Codex) ali
 | --- | --- |
 | `guidewire_rl/` | Our code, one Python package: `env/` (the MDP side), `model/` (the solver side), `train/` (the training loop), `config.py` (reads the YAML) |
 | `simulator_modifications/` | Our changes to the simulator: 7 Python files that register fixed versions under stEVE's own class names, and `beamadapter/` with 6 patches for BeamAdapter plus the build script |
-| `configs/` | 10 YAML files, a chain of inheritance (see "Configs") |
-| `scripts/` | Entry points: `train.py`, `evaluate.py`, `inspect_env.py`, `record_demos.py`, `make_snapshots.py` |
+| `configs/` | 16 YAML files, a chain of inheritance (see "Configs") |
+| `scripts/` | Entry points: `train.py`, `evaluate.py`, `inspect_env.py`, `record_demos.py`, `make_snapshots.py`, `offline_updates.py` (updates on a checkpoint's own replay, no simulation), `reward_check.py`, `wandb_layout.py`; `remote/` sets up a rented machine as a training machine (its own `README.md`) |
 | `tests/` | pytest, roughly one file per part (see "Tests") |
 | `visual/workbench/` | A viser workbench: pick a phantom version and a setting, deploy a policy, look at the instruments and centerlines, an X-ray mode. Viewed in the browser, the simulation runs in Python |
 | `docs/` | Three technical documents, in Chinese: `training_framework.md` (how to use the framework), `simulator_changes.md` (every simulator problem we found, what we did about it, numbered), `simulation_speed.md` (the speed-up work) |
-| `environment.yml`, `pyproject.toml` | The conda environment and the package definition |
+| `environment.yml`, `pyproject.toml`, `requirements.lock.txt` | The conda environment, the package definition, and the exact version of every pip package in the environment |
 | `THIRD_PARTY_NOTICES.md` | Where the copied code and data come from and under which licence |
 
 Not in the repository, to be installed separately: SOFA 25.12, stEVE (pinned commit), our build of BeamAdapter. Optional: `reference/` (Wilson's original package and the G13 checkpoint, only needed to reproduce G13). Output directories `runs/` and `outputs/` are not committed.
 
-The folders have their own `README.md` (`guidewire_rl/env/two_device/`, `env/c_arm/`, `env/vessels/biro_phantom/`, `env/instruments/data/`, `simulator_modifications/`, `visual/workbench/`), written in Chinese: what every file in that folder does, where the data came from. Some links in them and in `docs/` point to internal planning and log files (`todo_list/`, `agent_log/`); those are not part of this repository, skip them.
+The folders have their own `README.md` (`guidewire_rl/env/two_device/`, `env/c_arm/`, `env/vessels/biro_phantom/`, `env/instruments/data/`, `simulator_modifications/`, `visual/workbench/`), written in Chinese: what every file in that folder does, where the data came from. Some links and comments in them, in `docs/` and in the code point to internal planning and log files (`todo_list/`, `agent_log/`, `docs/design.md`, `docs/wandb_metrics.md`); those are not part of this repository, skip them.
 
 ## Installation (Linux; the versions in use on 2026-11-10)
 
-Paths are the ones on our machine (`~/opt/…`, `~/Project/…`). If you install elsewhere, change the environment variables below and the variables at the top of `build.sh` accordingly.
+Paths are the ones on our machine (`~/opt/…`, `~/Projects/…`). If you install elsewhere, change the environment variables below and the variables at the top of `build.sh` accordingly.
 
 1. **The SOFA v25.12.00 Linux binary**, unpacked to `~/opt/SOFA_v25.12.00_Linux` (download from the GitHub releases of `sofa-framework/sofa`). It ships SofaPython3 (Python 3.12) and BeamAdapter; we do not use its BeamAdapter (step 5).
 
@@ -88,8 +95,9 @@ conda run --no-capture-output -n guidewire_rl python scripts/train.py --config c
     --set training.total_steps=1000 --run-name smoke          # override one value, name the run
 conda run --no-capture-output -n guidewire_rl python scripts/train.py --config configs/two_devices_ica.yaml \
     --resume runs/<run>/checkpoints/step_N.pt
-# evaluate a checkpoint (fixed seeds, the planner's mean action)
-conda run --no-capture-output -n guidewire_rl python scripts/evaluate.py --config configs/two_devices_ica.yaml \
+# evaluate a checkpoint (fixed seeds, held-out target points, no exploration noise; who acts follows the config's
+# planning.mpc: the planner's mean action, or with `mpc: false` the policy network's)
+conda run --no-capture-output -n guidewire_rl python scripts/evaluate.py --config configs/two_devices_ica_dagger.yaml \
     --checkpoint runs/<run>/checkpoints/step_N.pt --episodes 20 --workers 8
 # show what the policy sees (observation layout, reward and labels for a few random actions)
 conda run --no-capture-output -n guidewire_rl python scripts/inspect_env.py --config configs/two_devices_ica.yaml
@@ -103,6 +111,52 @@ conda run --no-capture-output -n guidewire_rl python visual/workbench/workbench.
 ```
 
 Every script's module docstring lists all of its arguments.
+
+## The released policy
+
+The GitHub release `right-ica-v1` of this repository carries one archive, `right_ica_policy_step520000.tar` (about 450 MB). Unpack it at the repository root; it creates `runs/right_ica_release/`:
+
+| File | What it is |
+| --- | --- |
+| `policy_step_520000.pt` | The training state at step 520 000 of the run that produced the result above: world model, value and policy networks, optimizers, the replay buffer and the schedule's state. It can be evaluated, deployed in the workbench, or resumed |
+| `training_config.yaml` | The complete merged config that run was trained with |
+| `demos_round2f/` | The 56 demonstration episodes of the hand-written procedure that `configs/two_devices_ica_dagger.yaml` names (needed to train from scratch, and loaded when a run starts) |
+| `eval_step520000.json` | The summary of the 100-episode evaluation (93 / 100) |
+| `sha256.txt`, `README.md` | Checksums; the same instructions as here |
+
+```bash
+tar -xf right_ica_policy_step520000.tar          # at the repository root
+cp -r runs/right_ica_release/demos_round2f runs/demos_round2f      # where the config looks for the demonstrations
+
+# evaluate: 40 episodes from the insertion point, 10 processes
+conda run --no-capture-output -n guidewire_rl python scripts/evaluate.py \
+    --config configs/two_devices_ica_dagger.yaml \
+    --checkpoint runs/right_ica_release/policy_step_520000.pt \
+    --episodes 40 --seed 8000 --workers 10 --device cpu
+
+# watch it (see visual/workbench/README.md)
+conda run --no-capture-output -n guidewire_rl python visual/workbench/workbench.py --env two_devices_ica_dagger \
+    --checkpoint runs/right_ica_release/policy_step_520000.pt --play
+
+# train on from it, without the teacher (the settings of the run it came from)
+conda run --no-capture-output -n guidewire_rl python scripts/train.py \
+    --config configs/two_devices_ica_dagger.yaml --run-name my_run \
+    --resume runs/right_ica_release/policy_step_520000.pt \
+    --set training.num_envs=20 --set training.async_envs=true \
+    --set training.total_steps=1000000 \
+    --set model.log_std_max=-2.3 --set env.scene.target.jitter_mm=0.5 \
+    --set env.monitors.phase_detector.thresholds.target_mm=3.0 \
+    --set env.monitors.phase_detector.thresholds.tier2_cath_past_split=8.0 \
+    --set logging.wandb.mode=offline
+```
+
+Notes for training on:
+
+- The checkpoint remembers that the teacher has been faded out, so a resumed run learns by reinforcement learning alone. To train a new task variant (another config of the chain, e.g. `two_devices_ica_randomized.yaml`), pass that config with the same `--resume`; the observation layout must stay the same or the checkpoint cannot be loaded.
+- The last four `--set` lines before the wandb one are what the producing run used: a tighter cap on the policy's exploration noise, training targets moved by up to 0.5 mm per episode, and training-time success lines stricter than the evaluation's (wire within 3 mm, catheter 8 mm past the bifurcation; the evaluation uses 5 and 5). Without them the policy tends to stop just short of the evaluation's lines.
+- `training.num_envs` is the number of simulation processes; 20 fit a 32-thread desktop. `logging.wandb.mode=offline` avoids needing a wandb account (the config's default is `online`).
+- Training rates of success are measured with exploration noise and overstate the noise-free result. Judge a checkpoint by `scripts/evaluate.py` only, with 100 episodes for a final number (the simulation is not bit-reproducible in closed loop, 8-20 episodes only give a rough picture).
+- To train from scratch instead: the same command without `--resume` and without those four `--set` lines. The run that produced the release reached its first passing evaluations around 150 000 steps and had the teacher fully faded out at about 290 000.
 
 ## Map: which question each folder answers
 
@@ -123,7 +177,7 @@ The `env:` section of a YAML maps to `env/`, the `model:` and `training:` sectio
 ### `env/` mixes two ways of splitting
 
 - **By kind of part**: `observations/` (observation terms), `labels/`, `instruments/`, `vessels/`, `c_arm/` (imaging angle). Each folder is one kind of replaceable part, chosen by name in the config. At the top, `builder.py` (assembles the scene), `registry.py` (name → class), `guidewire_env.py` (the gymnasium wrapper) and `actions.py` (policy action → stEVE command) are the assembly framework.
-- **By task**: `two_device/` keeps every part of the two-device task together: `route.py` (the route and its ruler), `phases.py` (the referee: five phases, success, hard failure), `observations.py`, `rewards.py`, `targets.py`, `start.py`, `terminal.py`, `truncation.py`, `wall.py` (distance to the wall, wall breach), `labels.py`, `actions.py` (the safety shell), `snapshot.py` (episode start from a saved simulator state), `script.py` (the scripted controller, the teacher; not a config part). The table of parts is in that folder's `README.md`.
+- **By task**: `two_device/` keeps every part of the two-device task together: `route.py` (the route and its ruler), `phases.py` (the referee: five phases, success, hard failure), `observations.py`, `reward_formula.py` (the reward, one formula), `rewards.py` (round one's reward terms), `targets.py`, `start.py`, `terminal.py`, `truncation.py`, `wall.py` (distance to the wall, wall breach), `labels.py`, `actions.py` (the action mapping and its limits), `snapshot.py` (episode start from a saved simulator state), `script.py` (the scripted controller, the teacher; not a config part), `prefix.py` (the scripted controller driving the first part of an episode), `shadow.py` (the scripted controller running beside the policy and giving each step's imitation target). The table of parts is in that folder's `README.md`.
 - `vessels/` holds three different things: the class that puts the vessels into stEVE at runtime (`biro_phantom.py`), offline scripts that generate meshes and centerlines from the STL (in use: `biro_rebuild.py`, `biro_spheres.py`, `biro_cut.py`; earlier versions: `biro_phantom_root.py`, `biro_phantom_all.py`, `biro_phantom_lumen*.py`), and the data folder `biro_phantom/` (what every file is, its hash, how to regenerate it: the `README.md` there).
 
 ### How a name becomes a class
@@ -143,7 +197,11 @@ g13.yaml                      G13 reproduction: every number from the training c
          ├─ phantom_real_mass.yaml   single guidewire, real mass, 2 ms physics step
          └─ two_devices_round1.yaml  guidewire + hooked catheter, target right common carotid (round one)
             └─ two_devices_real_mass.yaml   both devices at real mass, 4 ms physics step, all simulator switches on
-               └─ two_devices_ica.yaml      target right internal carotid, C-arm angle per target, gamma pinned -- the one in use
+               └─ two_devices_ica.yaml      target right internal carotid, C-arm angle per target, gamma pinned -- the task definition all the files below share
+                  ├─ two_devices_ica_{nodemo,selfstart,demostart}.yaml   the same task, three other ways of getting the policy started (docs/training_framework.md)
+                  │   └─ two_devices_ica_nodemo_best.yaml   nodemo with progress paid only when it is new (abandoned, kept as a control)
+                  └─ two_devices_ica_dagger.yaml   the teacher in shadow -- the one that produced the released policy
+                      └─ two_devices_ica_randomized.yaml   training on with friction and command execution randomized per episode (work in progress)
 ```
 
 The header comment of every file says what changed relative to its parent, why, and when it was decided. `g13.yaml` only runs in the old environment.
@@ -163,7 +221,7 @@ configs/*.yaml -> scripts/train.py -> config.py
 - **Change simulator behaviour** (contact, collision, speed, seeding, coordinate transforms): `simulator_modifications/`. If Python suffices, write a subclass and register it under the original name; if BeamAdapter's C++ must change, add a patch: edit in `beamadapter/build/src` (the baseline with the existing patches applied and `git add -A`), `git -C build/src diff > <name>.patch`, list it in `PATCHES` in `build.sh`, rebuild. `build.sh` resets to the pinned commit and re-applies all patches every run, so hand edits not saved as a patch are lost. Every change gets a problem number in `docs/simulator_changes.md`.
 - **Replace vessel data**: never edit the data files by hand. Regenerate (commands in `env/vessels/biro_phantom/README.md`), update the hashes in `tests/test_biro_phantom.py` and the README's table.
 - **Replace the C-arm angle table**: recompute with `env/c_arm/choose_angle.py`, write to `env/c_arm/data/`; see `env/c_arm/README.md`.
-- **A new experiment**: a new YAML whose first line is `extends: two_devices_ica.yaml`, listing only what changes. For a one-off change of a value use `--set section.key=value`.
+- **A new experiment**: a new YAML whose first line is `extends: two_devices_ica_dagger.yaml` (or another file of the chain), listing only what changes. For a one-off change of a value use `--set section.key=value`.
 
 ### Files that must not be edited by hand
 
@@ -178,8 +236,8 @@ configs/*.yaml -> scripts/train.py -> config.py
 | --- | --- |
 | `config.py` / `registry.py` | `test_config.py`, `test_registry.py` |
 | `model/` | `test_agent.py` |
-| `train/` | `test_trainer.py`, `test_parallel.py`, `test_replay.py`, `test_two_device_training.py` (fake env) |
-| parts in `two_device/` | `test_two_device_env.py`; the scripted controller `test_two_device_script.py` (includes a whole SOFA episode); wall distance / breach `test_wall_monitor.py`; force labels `test_tip_force_fast.py`; the force gate `test_force_blowup.py`; snapshots `test_snapshot.py` |
+| `train/` | `test_trainer.py`, `test_parallel.py`, `test_replay.py`, `test_two_device_training.py`, `test_round2_training.py`, `test_round2_schedule.py`, `test_start_library.py`, `test_fast_update.py` (fake env) |
+| parts in `two_device/` | `test_two_device_env.py`; `test_two_device_round2.py`; the scripted controller `test_two_device_script.py` (includes a whole SOFA episode) and its shadow mode `test_shadow_expert.py`; per-episode randomization `test_randomization.py`; wall distance / breach `test_wall_monitor.py`; force labels `test_tip_force_fast.py`; the force gate `test_force_blowup.py`; snapshots `test_snapshot.py` |
 | `simulator_modifications/` | `test_simulator_modifications.py`, `test_device_contact.py`, `test_trim_sheathed.py` (all need SOFA) |
 | `vessels/`, `instruments/`, `c_arm/`, `observations/` | `test_biro_phantom.py`, `test_instruments.py`, `test_c_arm*.py`, `test_vessel_geometry.py` |
 | scene assembly as a whole | `test_env_sofa.py` |
@@ -187,13 +245,9 @@ configs/*.yaml -> scripts/train.py -> config.py
 
 The two-device SOFA tests share `tests/two_device_scenes.py` (building scenes, pushing devices, reading the collision chain).
 
-## State of the work (a snapshot of 2026-11-10; the commit history is authoritative after that)
+## Known pitfalls
 
-- **Round one of two-device training** (2026-10-31 to 11-02, `two_devices_round1.yaml`, 1.7 M steps) had a success rate of 0; the post-mortem attributed it to the direction of the reward. Round two is being redesigned block by block along the data flow.
-- **Already in code and config** (`two_devices_ica.yaml`): target in the right internal carotid; both devices at real mass; physics step 4 ms, collision alarm distance 1.0 mm, no collision points on the wire where it is sheathed by the catheter (together about 2.3x faster than the 2 ms configuration before the speed-up work, numbers in `docs/simulation_speed.md`; real mass itself is slower than round one's default mass, so still slower than round one's 0.1 s per step); a wall breach is treated as a simulator fault (that step dropped, the episode closed as `breach`, counted separately); any contact point's normal force above 30 N truncates the episode as a simulation error; the scripted controller gives up; the C-arm angle is looked up per target branch; the discount factor is pinned at 0.99375.
-- **Built and verified, not yet in a training config**: episode start from a saved simulator state (`FromSnapshot` in `two_device/snapshot.py`, library built by `scripts/make_snapshots.py`).
-- **Decided, code not yet changed** (block 1 of round two): the safety shell keeps only the insertion-length limits (the code still has round one's shell: speed limit, force limit, equal-length guard and more); contact forces go into the reward, not into the shell; the junction map gives all 6 junctions of the route at once; the task's 2D box is computed from the whole vessel tree; the observation grows from 110 to 120 values. Where the code and this paragraph disagree, the code is the current state and this paragraph the direction.
-- **Known pitfalls**: the BeamAdapter shipped with SOFA segfaults on a push of exactly 0.01 mm (hence our build); when both devices have the same insertion length BeamAdapter prints "Case 1" warnings, its own 0.01 mm threshold, harmless; `conda run` without `--no-capture-output` shows no live output; a NaN in the simulation (`SimError`), a wall breach (`WallBreach`) and a force blow-up (`TipForceBlowup`) are truncations, not terminations, and the trainer drops that step; the workbench needs Chrome's WebGL, the desktop app's embedded browser cannot render it.
+The BeamAdapter shipped with SOFA segfaults on a push of exactly 0.01 mm (hence our build); when both devices have the same insertion length BeamAdapter prints "Case 1" warnings, its own 0.01 mm threshold, harmless; `conda run` without `--no-capture-output` shows no live output; a NaN in the simulation (`SimError`), a wall breach (`WallBreach`) and a force blow-up (`TipForceBlowup`) are truncations, not terminations, and the trainer drops that step; the workbench needs Chrome's WebGL, the desktop app's embedded browser cannot render it.
 
 ## Origin and licences
 

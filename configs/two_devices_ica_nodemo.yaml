@@ -1,0 +1,18 @@
+# Round two without the crutches (user 2026-11-11: "see what happens with no demonstrations").
+# Everything is two_devices_ica.yaml; only these are off:
+#   - start curriculum: every episode starts at the insertion point (no scripted prefix)
+#   - demonstrations: none loaded into the replay
+#   - self-demonstrations: the policy's own successes are not protected from eviction
+#   - schedule: nothing to ramp, so no stages / guard / ladder / stop rule
+# The hint terms of the reward (progress, follow) stay on, as decided 2026-11-10 16:19.
+# null deletes the inherited key (guidewire_rl/config.py deep_merge), so the trainer sees "absent".
+extends: two_devices_ica.yaml
+
+training:
+  start_curriculum: null
+  demos: null
+  self_demos: {enabled: false}
+  schedule: null
+
+logging:
+  wandb: {tags: [round2, two_devices_ica, nodemo]}

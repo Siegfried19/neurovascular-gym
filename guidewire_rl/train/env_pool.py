@@ -34,7 +34,10 @@ or the desktop session (which sets 200-300 on its own processes).
 
 A reset command carries either the seed or ``{"seed": s, "cutoff": k}``; with a
 cutoff the worker calls ``env.set_cutoff(k)`` before ``env.reset(seed=s)``
-(``training.cutoff_mixture``).
+(``training.cutoff_mixture``). With ``prefix_ratio`` (and ``prefix_max_steps``) the worker
+also runs the scripted prefix after the reset (two_device/prefix.py), which may take minutes:
+such a reset is given ``timeout + prefix_max_steps x PREFIX_STEP_SECONDS`` seconds before the
+worker counts as hung (``prefix_step_seconds``), every other command the plain ``timeout``.
 
 Workers are started with ``spawn`` (the parent may already hold CUDA), so the
 factory and its arguments must be picklable: a module-level function or class
@@ -60,13 +63,17 @@ from typing import (AbstractSet, Any, Callable, Dict, List, Mapping, Optional, S
 
 import numpy as np
 
-# the parts of info the trainer reads (task metrics, curriculum and residual box included)
+# the parts of info the trainer reads (task metrics, curriculum and residual box included; the
+# shadow expert's imitation target, two_device/shadow.py)
 INFO_KEYS = ("is_success", "simulation_error", "labels", "phase", "max_phase", "events",
              "shield_delta", "d", "executed_action", "nominal_action", "nominal_available",
              "sim_error", "hard_failure", "failure_reason", "cutoff", "shield_penalized",
-             "wall_breached")
+             "wall_breached", "reward_materials", "tier1", "depth_ica_c", "depth_ica_w",
+             "progress_ratio", "force_blowup_N", "landmark_grid", "landmark_grids", "snapshot_start",
+             "expert_action", "expert_stage", "stalled", "scenario")
 DEFAULT_TIMEOUT = 120.0        # seconds without an answer before a worker is replaced
 BUILD_TIMEOUT = 600.0          # seconds a (new) worker may take to build its scene
+PREFIX_STEP_SECONDS = 3.0      # a reset that runs a scripted prefix may take this long per prefix step on top
 RESTART_ATTEMPTS = 3           # a replacement that fails to build is tried this many times
 WORKER_OOM_SCORE_ADJ = 500     # above the desktop's 200-300: out of memory, a worker goes first
 CLOSE_WAIT = 10.0              # seconds a recycled worker gets to shut its scene down
@@ -108,9 +115,35 @@ def system_available_mb() -> Optional[float]:
     return None
 
 
-def reset_command(seed: int, cutoff: Optional[int] = None) -> Tuple[str, Any]:
-    """The pool's reset command; plain seed when there is no cutoff (as before)."""
-    return ("reset", int(seed) if cutoff is None else {"seed": int(seed), "cutoff": int(cutoff)})
+def reset_command(seed: int, cutoff: Optional[int] = None,
+                  prefix_ratio: Optional[float] = None, prefix_max_steps: int = 600,
+                  prefix_key: str = "progress_ratio", snapshot: Optional[str] = None,
+                  save_dir: Optional[str] = None, save_tag: str = "", save_bins: int = 10,
+                  end_when_stalled: bool = False) -> Tuple[str, Any]:
+    """The pool's reset command; plain seed when there is no cutoff and no prefix (as before).
+    ``prefix_ratio``: the worker runs the scripted prefix to that progress ratio after the reset
+    (two_device/prefix.py) and reports it in ``info["prefix"]``; ``prefix_key``: the info key the
+    prefix runs up to (``landmark_grid`` with the landmark grid; sent only when not the default).
+    ``snapshot``: start the episode from that saved state (the policy's own start library,
+    train/start_library.py); ``save_dir``: save a state each time the episode first reaches a new
+    grid of ``save_bins`` (two_device.snapshot.EpisodeSnapshots, files named after ``save_tag``)."""
+    if cutoff is None and prefix_ratio is None and snapshot is None and save_dir is None and not end_when_stalled:
+        return ("reset", int(seed))
+    data: Dict[str, Any] = {"seed": int(seed)}
+    if end_when_stalled:                 # this episode ends once the devices stand still (two_device Stalled)
+        data["end_when_stalled"] = True
+    if cutoff is not None:
+        data["cutoff"] = int(cutoff)
+    if prefix_ratio is not None:
+        data["prefix_ratio"] = float(prefix_ratio)
+        data["prefix_max_steps"] = int(prefix_max_steps)
+        if prefix_key != "progress_ratio":
+            data["prefix_key"] = str(prefix_key)
+    if snapshot is not None:
+        data["snapshot"] = str(snapshot)
+    if save_dir is not None:
+        data.update(save_dir=str(save_dir), save_tag=str(save_tag), save_bins=int(save_bins))
+    return ("reset", data)
 
 
 def split_cpus() -> Optional[Tuple[Set[int], Set[int]]]:
@@ -164,6 +197,7 @@ def _worker(conn, factory: Callable, args: Sequence[Any], kwargs: Mapping[str, A
         "observation_names": list(getattr(env, "observation_names", [])),
         "supports_cutoff": callable(getattr(env, "set_cutoff", None)),
     }))
+    saver = None                                     # the episode's along-the-way snapshots (start library)
     try:
         while True:
             try:
@@ -174,15 +208,49 @@ def _worker(conn, factory: Callable, args: Sequence[Any], kwargs: Mapping[str, A
                 break
             try:
                 if command == "reset":
+                    prefix_ratio, prefix_steps, prefix_key = None, 600, "progress_ratio"
+                    snapshot, save = None, None
                     if isinstance(data, Mapping):
                         if data.get("cutoff") is not None:
                             env.set_cutoff(int(data["cutoff"]))
+                        if data.get("end_when_stalled") and callable(getattr(env, "end_when_stalled", None)):
+                            env.end_when_stalled()
+                        prefix_ratio = data.get("prefix_ratio")
+                        prefix_steps = int(data.get("prefix_max_steps", 600))
+                        prefix_key = str(data.get("prefix_key", "progress_ratio"))
+                        snapshot = data.get("snapshot")
+                        if data.get("save_dir") is not None:
+                            save = (data["save_dir"], data.get("save_tag", ""), int(data.get("save_bins", 10)))
                         data = data.get("seed")
-                    observation, info = env.reset(seed=data)
-                    reply = ("ok", (observation, _small_info(info)))
+                    observation, info = env.reset(seed=data, options={"snapshot": snapshot} if snapshot else None)
+                    if save is not None:
+                        from guidewire_rl.env.two_device.snapshot import EpisodeSnapshots
+                        if saver is None or saver.bins != save[2]:
+                            saver = EpisodeSnapshots(bins=save[2])
+                        saver.begin(save[0], save[1], float(info.get("progress_ratio", 0.0) or 0.0) if snapshot else 0.0)
+                    elif saver is not None:
+                        saver.begin(None, "")
+                    info = _small_info(info)
+                    if prefix_ratio is not None:
+                        from guidewire_rl.env.two_device.prefix import run_prefix
+                        prefix = run_prefix(env, float(prefix_ratio), max_steps=prefix_steps,
+                                            small_info=_small_info, first_info=info, key=prefix_key)
+                        prefix["first_observation"], prefix["first_info"] = observation, info
+                        if prefix["observation"] is not None:
+                            observation, info = prefix["observation"], dict(prefix["info"])
+                        info["prefix"] = prefix
+                    reply = ("ok", (observation, info))
                 elif command == "step":
                     observation, reward, terminated, truncated, info = env.step(data)
-                    reply = ("ok", (observation, reward, terminated, truncated, _small_info(info)))
+                    small = _small_info(info)
+                    if saver is not None and saver.directory is not None:
+                        try:
+                            saved = saver.after_step(env, info)
+                        except Exception as exc:  # pylint: disable=broad-except
+                            saved = {"error": repr(exc)}
+                        if saved is not None:
+                            small["snapshot_saved"] = saved
+                    reply = ("ok", (observation, reward, terminated, truncated, small))
                 else:
                     reply = ("error", f"unknown command {command!r}")
             except Exception as exc:  # pylint: disable=broad-except
@@ -210,14 +278,17 @@ class EnvPool:
                  kwargs: Optional[Mapping[str, Any]] = None, *, num_envs: int,
                  seed: Optional[int] = None, timeout: float = DEFAULT_TIMEOUT,
                  cpus: Optional[AbstractSet[int]] = None,
-                 max_rss_mb: Optional[float] = None) -> None:
+                 max_rss_mb: Optional[float] = None,
+                 prefix_step_seconds: float = PREFIX_STEP_SECONDS) -> None:
         """``cpus``: the CPUs the workers may run on (default: wherever the OS puts them).
         ``max_rss_mb``: recycle a worker above this resident memory at its next reset
-        (module docstring; None: never)."""
+        (module docstring; None: never). ``prefix_step_seconds``: the extra time a reset with a
+        scripted prefix gets per prefix step before its worker counts as hung."""
         if num_envs < 1:
             raise ValueError("num_envs must be at least 1")
         self.factory, self.args, self.kwargs = factory, tuple(args), dict(kwargs or {})
         self.seed, self.timeout = seed, float(timeout)
+        self.prefix_step_seconds = float(prefix_step_seconds)
         self.cpus = set(cpus) if cpus else None
         self.max_rss_mb = None if max_rss_mb is None else float(max_rss_mb)
         self.restarts = 0                           # replaced because they died or hung
@@ -228,6 +299,7 @@ class EnvPool:
         self._conns: List[Any] = [None] * num_envs
         self._pending: Dict[int, str] = {}
         self._sent_at: Dict[int, float] = {}
+        self._deadline: Dict[int, float] = {}        # seconds each pending command may take
         self._dead: set = set()
         try:
             for index in range(num_envs):        # all workers build their scene at once
@@ -251,7 +323,13 @@ class EnvPool:
         """Another pool of the same env (e.g. for evaluation; close it when done)."""
         return EnvPool(self.factory, self.args, self.kwargs, num_envs=num_envs,
                        seed=None if self.seed is None else self.seed + 10_000,
-                       timeout=self.timeout, cpus=self.cpus)
+                       timeout=self.timeout, cpus=self.cpus, prefix_step_seconds=self.prefix_step_seconds)
+
+    def _allowed_seconds(self, command: str, data: Any) -> float:
+        """How long a command may take: the timeout, plus the prefix's steps for a reset that runs one."""
+        if command == "reset" and isinstance(data, Mapping) and data.get("prefix_ratio") is not None:
+            return self.timeout + float(data.get("prefix_max_steps", 600)) * self.prefix_step_seconds
+        return self.timeout
 
     def worker_rss_mb(self) -> List[Optional[float]]:
         """Each worker's resident memory in MB (None where it cannot be read)."""
@@ -363,6 +441,7 @@ class EnvPool:
         for index, (command, data) in commands.items():
             self._pending[index] = command
             self._sent_at[index] = now
+            self._deadline[index] = self._allowed_seconds(command, data)
             try:
                 self._conns[index].send((command, data))
             except (BrokenPipeError, OSError):
@@ -393,12 +472,14 @@ class EnvPool:
             del self._pending[index]
         now = time.monotonic()
         for index in sorted(self._pending):
-            if index in self._dead or now - self._sent_at[index] > self.timeout:
+            allowed = self._deadline.get(index, self.timeout)
+            if index in self._dead or now - self._sent_at[index] > allowed:
                 reason = ("died" if index in self._dead
-                          else f"timed out (no answer in {self.timeout:.0f} s)")
+                          else f"timed out (no answer in {allowed:.0f} s)")
                 self._restart(index, reason)
                 self._dead.discard(index)
                 del self._pending[index]
+                self._deadline.pop(index, None)
                 results[index] = Result(False, error=f"env worker {index} {reason}; restarted")
         return results
 
@@ -406,7 +487,8 @@ class EnvPool:
         """Answers from every pending env (waits for all of them)."""
         results: Dict[int, Result] = {}
         while self._pending:
-            deadline = min(self._sent_at[index] for index in self._pending) + self.timeout
+            deadline = min(self._sent_at[index] + self._deadline.get(index, self.timeout)
+                           for index in self._pending)
             results.update(self.receive_ready(max(0.0, deadline - time.monotonic())))
         return results
 

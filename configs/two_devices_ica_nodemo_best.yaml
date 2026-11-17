@@ -1,0 +1,14 @@
+# Round two without crutches, progress paid only when it is new (user 2026-11-12: "try this").
+# Everything is two_devices_ica_nodemo.yaml; only the two progress terms change: progress_mode best
+# pays the part of a step's shortening that goes past the shortest path this episode has reached
+# (two_device/reward_formula.py). Backing off, overshooting a mouth and coming back, or pulling the wire
+# into the catheter cost only the step penalty. Why: the 200k policy of round2_nodemo_300k_v5 sat
+# 1-20 mm in front of the brachiocephalic mouth for 700 steps, the plain ruler's local maximum there
+# (WORK_LOG 2026-11-12 11:05).
+extends: two_devices_ica_nodemo.yaml
+
+env:
+  reward_formula: {progress_mode: best}
+
+logging:
+  wandb: {tags: [round2, two_devices_ica, nodemo, best_progress]}

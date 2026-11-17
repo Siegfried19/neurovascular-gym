@@ -16,6 +16,9 @@ env gives it, so a run on an env without them logs exactly what it always did):
 | ``wall_breached`` | a device's centerline outside the vessel mesh (two_device/wall.py); the trainers drop the step and close the episode as ``end: breach`` | ``breach_rate`` in the window summary (the step itself never reaches ``add``) |
 | ``failure_reason`` | why the env ended it as a failure (last step) | ``failure_reason`` |
 | ``cutoff`` | the cutoff in force (reset info) | ``cutoff`` (when the trainer set none) |
+| ``tier1`` | the first tier was paid (round two) | ``tier1`` |
+| ``progress_ratio`` | the task's progress, 0-1 (round two) | ``progress_end`` (where it ended) |
+| ``d`` (last step) | | ``lead_end`` (the wire's lead at the end, mm) |
 
 ``catheter_moving_frac`` (actions with 4 or more values: wire push, wire turn,
 catheter push, catheter turn): the fraction of steps whose catheter push
@@ -71,6 +74,9 @@ class EpisodeStats:
         self.catheter_moving = 0
         self.catheter_steps = 0
         self.sim_error = False
+        self.tier1: Optional[bool] = None
+        self.progress_end: Optional[float] = (float(reset_info["progress_ratio"])
+                                              if reset_info.get("progress_ratio") is not None else None)
         self.last_info: Mapping[str, Any] = reset_info
 
     def add(self, action: np.ndarray, info: Mapping[str, Any]) -> None:
@@ -102,6 +108,10 @@ class EpisodeStats:
             self.catheter_moving += int(abs(applied[CATHETER_PUSH]) > MOVING)
         if sim_error_of(info):
             self.sim_error = True
+        if info.get("tier1") is not None:
+            self.tier1 = bool(info["tier1"])
+        if info.get("progress_ratio") is not None:
+            self.progress_end = float(info["progress_ratio"])
 
     def where(self) -> Dict[str, Any]:
         """The phase the episode is in now (for event records), when the env reports phases."""
@@ -131,6 +141,16 @@ class EpisodeStats:
             out["sim_error"] = True
         if self.last_info.get("failure_reason"):
             out["failure_reason"] = str(self.last_info["failure_reason"])
+        if self.last_info.get("scenario"):          # this episode's scene parameters (env/randomization.py)
+            out["scenario"] = {k: float(v) for k, v in self.last_info["scenario"].items()}
+        if self.last_info.get("stalled"):
+            out["stalled"] = True
+        if self.tier1 is not None:
+            out["tier1"] = bool(self.tier1)
+        if self.progress_end is not None:
+            out["progress_end"] = float(self.progress_end)
+        if self.d:
+            out["lead_end"] = float(self.d[-1])
         return out
 
 
@@ -174,6 +194,37 @@ def window_summary(records: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         values = [r[key] for r in records if key in r]
         if values:
             out[key] = float(np.mean(values))
+    tiers = [r["tier1"] for r in records if "tier1" in r]
+    if tiers:
+        out["tier1_rate"] = float(np.mean(tiers))
+    ends = [r["progress_end"] for r in records if "progress_end" in r]
+    if ends:
+        out["progress_end_mean"] = float(np.mean(ends))
+        hist = defaultdict(int)
+        for r in records:
+            if "progress_end" in r:
+                hist[str(min(10, int(r["progress_end"] * 10) + 1) if not r["success"] else "done")] += 1
+        out["progress_end_hist"] = dict(sorted(hist.items()))
+    leads = [r["lead_end"] for r in records if "lead_end" in r]
+    if leads:
+        out["lead_end_p50"] = float(np.median(leads))
+    prefixed = [r for r in records if "prefix_steps" in r]
+    if prefixed:
+        out["prefix_step_share"] = float(sum(r["prefix_steps"] for r in prefixed)
+                                         / max(sum(r["length"] for r in prefixed), 1))
+        outcomes = [r.get("prefix_outcome") for r in prefixed if r.get("prefix_outcome")]
+        if outcomes:
+            out["prefix_gave_up_rate"] = float(np.mean([o == "gave_up" for o in outcomes]))
+    parts = [r["reward_parts"] for r in records if isinstance(r.get("reward_parts"), dict)]
+    if parts:
+        out["reward_parts"] = {k: float(np.mean([p[k] for p in parts if k in p])) for k in parts[0]}
+    starts = [r["start_grid"] for r in records if "start_grid" in r]
+    if starts:
+        values, counts = np.unique(starts, return_counts=True)
+        out["start_grid_share"] = {str(int(v)): float(c / len(starts)) for v, c in zip(values, counts)}
+        out["success_by_start_grid"] = {
+            str(int(v)): float(np.mean([r["success"] for r in records if r.get("start_grid") == v]))
+            for v in values}
     with_events = [r["events"] for r in records if "events" in r]
     if with_events:
         names = sorted({name for e in with_events for name in e})

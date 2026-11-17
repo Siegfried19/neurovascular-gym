@@ -1,0 +1,24 @@
+# Round two without demonstrations or scripts, with the policy's own start library (user 2026-11-12:
+# "let the policy's own far-reaching episodes be the starting points"; work log 2026-11-12 14:xx).
+# Everything is two_devices_ica_nodemo.yaml (the plain progress reward, no demonstrations, no schedule);
+# two things are added:
+#   - env.start FromSnapshot without a fixed library: an ordinary opening (WireFirst, 40 mm) unless the
+#     trainer asks for a saved state (reset(options={"snapshot": path}))
+#   - training.start_curriculum with supply 'self': training episodes save a state each time they first
+#     reach a new 10 % grid of the task's progress (into runs/<run>/starts), and later episodes start
+#     from those states: the highest grid with at least library_min states at or below the frontier gets
+#     the bulk, 30 % start from the insertion point; the frontier walks back when starts there succeed
+#     half of the time. A restored episode gets 800 steps from the restore (not from the insertion
+#     point: the far states are reached late, often after step 600).
+extends: two_devices_ica_nodemo.yaml
+
+env:
+  start: {type: FromSnapshot, fraction: 0.0, max_phase: 9, wire_mm: 40.0}
+
+training:
+  start_curriculum: {supply: self, grid: distance, bins: 10, baseline_fraction: 0.3, frontier_threshold: 0.5,
+                     min_episodes: 20, window_episodes: 100, update_every: 25000, floor_weight: 0.05,
+                     library_cap: 100, library_min: 5}
+
+logging:
+  wandb: {tags: [round2, two_devices_ica, nodemo, self_start]}

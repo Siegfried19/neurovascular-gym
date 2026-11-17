@@ -1,4 +1,4 @@
-"""What the policy of the two-device task sees (todo_list/two_devices_training.md, section 2).
+"""What the policy of the two-device task sees (todo_list/archive/two_devices_training.md, section 2).
 
 Only what a real setup can measure: the two devices in the 2D X-ray image (tracked tip and shape),
 the roadmap's openings and the target marked on the image, the robot's encoders (insertion
@@ -68,19 +68,21 @@ def sample_behind_2d(polyline2d: np.ndarray, n_points: int, spacing_mm: float) -
 
 
 class _TaskBox:
-    """The task box of a scene, computed once per (vessel tree, fluoroscopy angles)."""
+    """The 2D box of a scene, computed once per (vessel tree, fluoroscopy angles). ``region``:
+    'task' (the arch, its branches, the carotid to 100 mm) or 'tree' (the whole vessel tree)."""
 
-    def __init__(self, intervention) -> None:
+    def __init__(self, intervention, region: str = "task") -> None:
         self.intervention = intervention
+        self.region = region
         self._key = None
         self.low = self.high = None
 
     def get(self):
         fluoro = self.intervention.fluoroscopy
         key = (id(self.intervention.vessel_tree), tuple(np.ravel(fluoro.image_rot_zx)),
-               tuple(np.ravel(fluoro.image_center)))
+               tuple(np.ravel(fluoro.image_center)), self.region)
         if key != self._key:
-            self.low, self.high = task_box_2d(Route.of(self.intervention.vessel_tree), fluoro)
+            self.low, self.high = task_box_2d(Route.of(self.intervention.vessel_tree), fluoro, self.region)
             self._key = key
         return self.low, self.high
 
@@ -93,15 +95,38 @@ class _TaskBox:
         return (high - low) / 2.0
 
 
+@register("monitor")
+class TaskBox2D(_TaskBox):
+    """The 2D box as a shared scene part (``monitors: - {name: task_box, type: TaskBox2D, region:
+    tree}``): every 2D term built after it that takes ``task_box`` normalizes with this box instead
+    of its own 'task' one. ``region: tree`` = the whole vessel tree, so the same image position is
+    the same number for every target (user decision 2026-11-08)."""
+
+    def __init__(self, intervention, region: str = "tree", name: str = "task_box") -> None:
+        super().__init__(intervention, region)
+        self.name = name
+
+    def step(self) -> None:
+        pass
+
+    def reset(self, episode_nr: int = 0) -> None:
+        self.get()
+
+
+def _box_of(intervention, task_box: Optional[_TaskBox]) -> _TaskBox:
+    return task_box if task_box is not None else _TaskBox(intervention)
+
+
 @register("observation")
 class InstrumentTip2D(Observation):
     """One device's tip in the image, mm (module docstring)."""
 
-    def __init__(self, intervention, instrument: int = WIRE, name: str = "tip2d") -> None:
+    def __init__(self, intervention, instrument: int = WIRE, name: str = "tip2d",
+                 task_box: Optional[_TaskBox] = None) -> None:
         self.name = name
         self.intervention = intervention
         self.instrument = int(instrument)
-        self.box = _TaskBox(intervention)
+        self.box = _box_of(intervention, task_box)
         self.obs = np.zeros(2, dtype=np.float32)
 
     @property
@@ -123,14 +148,15 @@ class InstrumentShape2D(Observation):
     docstring). ``normalize: false`` keeps mm."""
 
     def __init__(self, intervention, instrument: int = WIRE, n_points: int = 4,
-                 spacing_mm: float = 4.0, normalize: bool = True, name: str = "shape2d") -> None:
+                 spacing_mm: float = 4.0, normalize: bool = True, name: str = "shape2d",
+                 task_box: Optional[_TaskBox] = None) -> None:
         self.name = name
         self.intervention = intervention
         self.instrument = int(instrument)
         self.n_points = int(n_points)
         self.spacing_mm = float(spacing_mm)
         self.normalize = bool(normalize)
-        self.box = _TaskBox(intervention)
+        self.box = _box_of(intervention, task_box)
         self.obs = np.zeros((self.n_points, 2), dtype=np.float32)
 
     @property
@@ -152,14 +178,24 @@ class InstrumentShape2D(Observation):
 
 @register("observation")
 class TaskTarget2D(Observation):
-    """The target in the image, mm (stEVE's ``Target2D`` asks the fluoroscopy for its 2D box,
-    which stEVE builds by rotating two corners of the vessel box: with a C-arm angle like
-    [61, -21] some low > high and gymnasium refuses the box)."""
+    """A goal point in the image, mm: ``point: target`` the wire's target (stEVE's ``Target2D``
+    asks the fluoroscopy for its 2D box, which stEVE builds by rotating two corners of the vessel
+    box: with a C-arm angle like [61, -21] some low > high and gymnasium refuses the box);
+    ``point: F`` the catheter's goal F (the referee's route places it), the second goal the
+    policy sees in round two (user decision 2026-11-08)."""
 
-    def __init__(self, intervention, name: str = "target2d") -> None:
+    def __init__(self, intervention, name: str = "target2d", point: str = "target",
+                 phase_detector: Optional[PhaseDetector] = None,
+                 task_box: Optional[_TaskBox] = None) -> None:
+        if point not in ("target", "F"):
+            raise ValueError(f"point must be 'target' or 'F', got {point!r}")
+        if point == "F" and phase_detector is None:
+            raise ValueError("TaskTarget2D(point='F') needs the referee (phase_detector) for F")
         self.name = name
         self.intervention = intervention
-        self.box = _TaskBox(intervention)
+        self.point = point
+        self.phase_detector = phase_detector
+        self.box = _box_of(intervention, task_box)
         self.obs = np.zeros(2, dtype=np.float32)
 
     @property
@@ -168,7 +204,11 @@ class TaskTarget2D(Observation):
         return gym.spaces.Box(low=low.astype(np.float32), high=high.astype(np.float32), dtype=np.float32)
 
     def step(self) -> None:
-        self.obs = np.asarray(self.intervention.target.coordinates2d, dtype=np.float32).reshape(2)
+        if self.point == "F":
+            point = to_tracking2d(self.phase_detector.route.F, self.intervention.fluoroscopy)
+            self.obs = np.asarray(point, dtype=np.float32).reshape(2)
+        else:
+            self.obs = np.asarray(self.intervention.target.coordinates2d, dtype=np.float32).reshape(2)
 
     def reset(self, episode_nr: int = 0) -> None:
         self.step()
@@ -213,10 +253,11 @@ class TipNoise2D(Observation):
 class Normalize2DTask(Observation):
     """Image mm -> [-1, 1] over the task box (module docstring)."""
 
-    def __init__(self, wrapped_obs: Observation, intervention, name: Optional[str] = None) -> None:
+    def __init__(self, wrapped_obs: Observation, intervention, name: Optional[str] = None,
+                 task_box: Optional[_TaskBox] = None) -> None:
         self.name = name or wrapped_obs.name
         self.wrapped_obs = wrapped_obs
-        self.box = _TaskBox(intervention)
+        self.box = _box_of(intervention, task_box)
         self.obs = None
 
     @property
@@ -235,11 +276,26 @@ class Normalize2DTask(Observation):
 
 @register("observation")
 class JunctionMap2D(Observation):
-    """The next openings on the route as an annotated roadmap would show them (module docstring)."""
+    """The route's openings as an annotated roadmap would show them (module docstring).
+
+    ``mode: next`` (the first round): the next ``n_junctions`` route turns neither tip is
+    ``enter_mm`` into yet, the target filling in past the last. ``mode: all`` (round two, user
+    decision 2026-11-08): the first ``n_junctions`` places on the route where any vessel leaves it
+    (``Route.all_junctions``: on this route the left subclavian, the left carotid, the trunk, the
+    trunk's end, the carotid's first side branch, the ICA/ECA split), in route order, every step,
+    the whole episode: no judgement of what was passed (that read the 3D truth); each as its image
+    position (offset by up to +-``offset_mm`` per axis, fixed for the episode, on a ``grid_mm`` grid)
+    and the image direction to go on in. A junction past the target (a target in the common
+    carotid, say) is still listed at its place, with direction (0, 0): nothing to go on into there
+    (user decision 2026-11-10; the ICA task has all six before its target, so it is unchanged).
+    Fewer junctions than slots: the target fills in."""
 
     def __init__(self, intervention, phase_detector: PhaseDetector, n_junctions: int = 2,
                  enter_mm: float = 8.0, offset_mm: float = 3.0, grid_mm: float = 2.0,
-                 name: str = "junctions") -> None:
+                 mode: str = "next", name: str = "junctions",
+                 task_box: Optional[_TaskBox] = None) -> None:
+        if mode not in ("next", "all"):
+            raise ValueError(f"mode must be 'next' or 'all', got {mode!r}")
         self.name = name
         self.intervention = intervention
         self.phase_detector = phase_detector
@@ -247,7 +303,8 @@ class JunctionMap2D(Observation):
         self.enter_mm = float(enter_mm)
         self.offset_mm = float(offset_mm)
         self.grid_mm = float(grid_mm)
-        self.box = _TaskBox(intervention)
+        self.mode = mode
+        self.box = _box_of(intervention, task_box)
         self.entries: List[np.ndarray] = []        # per route junction: annotated (x, z, dx, dz) mm/unit
         self.fill = np.zeros(4)
         self.obs = np.zeros(4 * self.n_junctions, dtype=np.float32)
@@ -262,28 +319,42 @@ class JunctionMap2D(Observation):
         return unit(b - a)
 
     def reset(self, episode_nr: int = 0) -> None:
-        route = Route.of(self.intervention.vessel_tree, self.phase_detector.route_chain)
+        # the referee's route (its target is set); the same shared object as Route.of gives
+        route = getattr(self.phase_detector, "route", None) or \
+            Route.of(self.intervention.vessel_tree, self.phase_detector.route_chain)
         fluoro = self.intervention.fluoroscopy
         rng = _episode_rng(self.intervention)
         self.entries = []
-        for _name, mouth, direction in route.junctions:
+        if self.mode == "next":
+            listed = [(n, m, d, True) for n, m, d in route.junctions]
+        else:
+            # a junction past the target keeps its position (the same vessel, the same numbers for
+            # every task) and gets no direction to go: (0, 0) (user decision 2026-11-10 21:36)
+            s_target = route.s_target
+            listed = [(n, m, d, s <= s_target) for n, m, d, s in route.all_junctions[: self.n_junctions]]
+        self.listed_names = [n for n, _, _, _ in listed]
+        for _name, mouth, direction, ahead in listed:
             position = to_tracking2d(mouth, fluoro).reshape(2)
             position = position + rng.uniform(-self.offset_mm, self.offset_mm, size=2)
             if self.grid_mm > 0:
                 position = np.round(position / self.grid_mm) * self.grid_mm
-            self.entries.append(np.r_[position, self._direction2d(mouth, direction)])
+            go = self._direction2d(mouth, direction) if ahead else np.zeros(2)
+            self.entries.append(np.r_[position, go])
         target = route.target
         self.fill = np.r_[to_tracking2d(target, fluoro).reshape(2),
                           self._direction2d(target, route.target_direction())]
         self.step()
 
     def step(self) -> None:
-        route = self.phase_detector.route
-        tips = devices_of(self.intervention.simulation).tips
-        ahead = []
-        for (name, _mouth, _direction), entry in zip(route.junctions, self.entries):
-            if max(route.depth(tip, name) for tip in tips) < self.enter_mm:
-                ahead.append(entry)
+        if self.mode == "all":
+            ahead = list(self.entries)
+        else:
+            route = self.phase_detector.route
+            tips = devices_of(self.intervention.simulation).tips
+            ahead = []
+            for name, entry in zip(self.listed_names, self.entries):
+                if max(route.depth(tip, name) for tip in tips) < self.enter_mm:
+                    ahead.append(entry)
         ahead = (ahead + [self.fill] * self.n_junctions)[: self.n_junctions]
         out = []
         for entry in ahead:
@@ -307,6 +378,29 @@ class PhaseOneHot(Observation):
         obs = np.zeros(N_PHASES, dtype=np.float32)
         obs[int(self.phase_detector.state.phase)] = 1.0
         self.obs = obs
+
+    def reset(self, episode_nr: int = 0) -> None:
+        self.step()
+
+
+@register("observation")
+class TierFlag(Observation):
+    """One number: 1 once the first tier was paid this episode, else 0. The first tier pays once,
+    so without this the same picture would be worth +1 or 0 depending on the past (user decision
+    2026-11-08). On the robot a part of the deployment judges it from the image or the operator
+    sets it (work log 2026-11-09 21:45)."""
+
+    def __init__(self, phase_detector: PhaseDetector, name: str = "tier1") -> None:
+        self.name = name
+        self.phase_detector = phase_detector
+        self.obs = np.zeros(1, dtype=np.float32)
+
+    @property
+    def space(self) -> gym.spaces.Box:
+        return gym.spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32)
+
+    def step(self) -> None:
+        self.obs = np.asarray([float(self.phase_detector.state.tier1_done)], dtype=np.float32)
 
     def reset(self, episode_nr: int = 0) -> None:
         self.step()

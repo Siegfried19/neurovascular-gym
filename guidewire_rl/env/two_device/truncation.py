@@ -20,11 +20,29 @@ and truncated the same step. It reads the tip-force monitor's ``peak_contact_N``
 multiplier of any contact in any substep, over all devices and their whole length, not only the 3 mm
 tip windows), which is in by the time truncations are evaluated. ``ForceBlowupInfo`` reports the peak
 as ``info["force_blowup_N"]`` (0 when none), to tell it from NaN.
+
+``Stalled``: the episode stops once neither device's inserted length has changed by ``min_mm`` (net,
+over the last ``window_steps`` steps): the policy has stopped, or rubs back and forth on the spot
+(rotation alone does not count as moving). Such an episode crawls: devices pressed into a narrow vessel
+and nearly still make the contact solver run to its iteration cap, 7-11 s per step against 0.3-2 s
+(docs/simulation_speed.md, 2026-11-15), so two or three of them held a 20-episode evaluation for an
+hour. Measured on 94 saved episodes of the 400k policy (``runs/round2_dagger_v3/final_400k``) with 100
+steps / 3 mm: 33 of the 34 episodes that ran to the step limit end early (a third of all steps), and 3
+of 60 successes that stood still for a while and then went on are ended too, so a success rate with
+the rule on is 2-3 points lower than without. On the delivered policy under changed conditions (1251
+episodes, 2026-11-16) 100 steps ended 43 of 1059 successes, 8 of 31 in one condition; 200 steps / 3 mm
+ends 9 (at most 2 per condition) and still 150 of the 167 episodes that ran to the step limit, so the
+config now says 200 (the class default stays 100). It is a truncation like the step limit (not a failure,
+not a simulation error; the value of the last state is bootstrapped). Off unless asked for:
+``always: true`` turns it on for every episode of this env (training episodes too);
+``env.end_when_stalled()`` turns it on for the next episode only (the evaluations do this with
+``evaluation.end_when_stalled``). ``StallInfo`` reports ``info["stalled"]``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Sequence
+from collections import deque
+from typing import Any, Deque, Dict, Sequence
 
 import numpy as np
 from eve.info import Info
@@ -119,3 +137,55 @@ class ForceBlowupInfo(Info):
     @property
     def info(self) -> Dict[str, Any]:
         return {"force_blowup_N": float(getattr(self.intervention.simulation, "force_blowup_N", 0.0))}
+
+
+@register("truncation")
+class Stalled(Truncation):
+    """Neither device's inserted length changed by ``min_mm`` over ``window_steps`` steps (module docstring)."""
+
+    def __init__(self, intervention, window_steps: int = 100, min_mm: float = 3.0, always: bool = False) -> None:
+        if int(window_steps) < 1 or float(min_mm) <= 0.0:
+            raise ValueError("Stalled: window_steps >= 1 and min_mm > 0")
+        self.intervention = intervention
+        self.window_steps, self.min_mm, self.always = int(window_steps), float(min_mm), bool(always)
+        self.requested = False                # ``end_when_stalled()``: on for the next episode
+        self.active = self.always             # in force for the current episode
+        self.history: Deque[np.ndarray] = deque(maxlen=self.window_steps + 1)
+        self.stalled = False
+
+    def end_when_stalled(self) -> None:
+        self.requested = True
+
+    def _inserted(self) -> np.ndarray:
+        return np.asarray(self.intervention.simulation.inserted_lengths, dtype=np.float64).reshape(-1).copy()
+
+    @property
+    def truncated(self) -> bool:
+        return self.stalled
+
+    def step(self) -> None:
+        self.history.append(self._inserted())
+        full = len(self.history) == self.window_steps + 1
+        self.stalled = bool(self.active and full
+                            and np.all(np.abs(self.history[-1] - self.history[0]) < self.min_mm))
+        self.intervention.simulation.stalled = self.stalled
+
+    def reset(self, episode_nr: int = 0) -> None:
+        self.active, self.requested = self.always or self.requested, False
+        self.history.clear()
+        self.history.append(self._inserted())
+        self.stalled = False
+        self.intervention.simulation.stalled = False
+
+
+@register("info")
+class StallInfo(Info):
+    """``info["stalled"]``: ``Stalled`` ended the episode this step (it leaves the flag on the simulation object)."""
+
+    def __init__(self, intervention, name: str = "stall") -> None:
+        super().__init__(name)
+        self.intervention = intervention
+
+    @property
+    def info(self) -> Dict[str, Any]:
+        return {"stalled": bool(getattr(self.intervention.simulation, "stalled", False))}

@@ -703,6 +703,28 @@ class ScriptParams:
     give_up_tries: int = 6          # hook placements (``tries``: a pull that found nothing or another
                                     # vessel, a turn that timed out, a re-seat after a loss); above the
                                     # script's own five places (``offsets_mm``), which it runs through first
+    # a procedure a policy without memory can copy (2026-11-14, work log: with the defaults above the
+    # shadow's labels in P1 could not be told from the observation, sign right 54 % of the time, and a
+    # policy that stood still got "hook down" and "hook up" in turns at the same state). Defaults = the
+    # procedure as it was; the DAgger config and its demonstrations switch these on.
+    first_place: bool = True        # False: on the first try the hook is turned up where the retraction
+                                    # left it (no place stage: no hook down, no overshoot); later tries
+                                    # place as before
+    turn_dir: int = 0               # 0: the hook turns the short way round (its sign depends on which
+                                    # side of the aim the hook is, which a 2D view does not show);
+                                    # -1 / +1: always this way while it is more than ``turn_far_deg``
+                                    # off its aim (place, lower, turn, pull). -1 is the way the turn
+                                    # stage went in all 51 demonstrations of 2026-11-13
+    turn_far_deg: float = 60.0
+    stall_needs_push: bool = False  # True (shadow: the policy drives): "pushed and did not move"
+                                    # (fork, ica, follow) counts only the steps whose push was executed
+                                    # (at least ``push_done_ratio`` of what the script asked), and what
+                                    # the tip moved over the other steps is left out; a push the policy
+                                    # did not make is not a stall and not a blocked wire. Only for a
+                                    # shell that passes pushes through (no force limit): it cannot tell
+                                    # a push the shell held back from one the policy did not make
+    push_done_ratio: float = 0.5
+    give_up: bool = True            # False (shadow): never give up, so the labels never stop
 
 
 STAGES = ("approach", "place", "turn", "pull", "seat", "wire", "ica", "follow", "trim", "done")
@@ -773,6 +795,11 @@ class StagedController:
         self._prev_depth_c = np.nan
         self._aim_override: Optional[float] = None
         self._wire_blocked = 0
+        self._wire_pushed = self._cath_pushed = True     # the last step's push was executed (``_note_shell``)
+        # ``stall_needs_push``: what each stall history last read, and how far the tip moved over the
+        # steps whose push was not executed (taken out of the history: a stall is about executed pushes)
+        self._fork_prev, self._fork_skip, self._ica_prev, self._ica_skip = np.nan, 0.0, np.nan, 0.0
+        self._f_prev, self._f_skip = np.nan, 0.0
         self._referee = None
         self.last_physical = np.zeros(4)
         self.readout: Optional[Readout] = None
@@ -920,7 +947,17 @@ class StagedController:
         intervention, _ = scene_of(env)
         executed = getattr(intervention, "last_action", None)
         commanded = self.last_physical[0] if self.steps > 0 else 0.0
-        if executed is None or commanded <= 1.0:
+        # was the push the script asked for last step executed? (``stall_needs_push``: in shadow the
+        # policy's action was, and a push it did not make is neither a stall nor a blocked wire)
+        self._wire_pushed = self._cath_pushed = True
+        if executed is not None and self.steps > 0:
+            done_all = np.asarray(executed, float).reshape(-1)
+            ratio = self.p.push_done_ratio
+            self._wire_pushed = not (commanded > 1.0 and done_all[0] < ratio * commanded)
+            if done_all.size >= 3:
+                asked = self.last_physical[2]
+                self._cath_pushed = not (asked > 1.0 and done_all[2] < ratio * asked)
+        if executed is None or commanded <= 1.0 or self.p.stall_needs_push:
             self._wire_blocked = 0
             return
         done = float(np.asarray(executed, float).reshape(-1)[0])
@@ -944,7 +981,7 @@ class StagedController:
         """Why the script gives up now ("" to go on): the catheter lost too often, too many hook
         placements, or the current stage past its step budget (``ScriptParams``, "giving up")."""
         p = self.p
-        if self.success or self.stage in ("trim", "done"):
+        if self.success or self.stage in ("trim", "done") or not p.give_up:
             return ""
         if self.rewires >= p.give_up_rewires:
             return f"rewires:{self.rewires}"
@@ -1005,6 +1042,9 @@ class StagedController:
             if r.d > -p.behind_mm:
                 return -p.v_retract, 0.0, -p.v_cath_retract, 0.0
             self._over = False
+            if not p.first_place and self.tries == 0:
+                self._go("turn", "", r.L[CATH])      # hook up where it is; a failed pull places it
+                return self._turn(r)
             self._go("place", "", r.L[CATH])
         if self.substage == "rewire":         # the catheter came out of the trunk: wire behind the hook
             if r.d > -p.behind_mm:
@@ -1017,7 +1057,9 @@ class StagedController:
             self._go("place", "", r.L[CATH])
         if self.substage == "lower":
             # hook down again (and out of any vessel) before the next place
-            w_c = float(np.clip(p.k_rot * r.phi_down, -p.w_cath_max, p.w_cath_max))
+            w_c = self._far_turn(r.phi_down)
+            if w_c is None:
+                w_c = float(np.clip(p.k_rot * r.phi_down, -p.w_cath_max, p.w_cath_max))
             done = abs(r.phi_down) < np.radians(p.place_down_deg) or self._elapsed() > p.lower_timeout
             v_c = p.v_free if self._cath_in_wrong_vessel(r) or r.cath_in_bct else 0.0
             if done and v_c == 0.0:
@@ -1032,7 +1074,9 @@ class StagedController:
             else:
                 err += p.over_mm
         e_aim = wrap(r.phi_up - np.radians(p.place_aim_deg))
-        w_c = float(np.clip(p.k_rot * e_aim, -p.w_cath_max, p.w_cath_max))
+        w_c = self._far_turn(e_aim)
+        if w_c is None:
+            w_c = float(np.clip(p.k_rot * e_aim, -p.w_cath_max, p.w_cath_max))
         placed = self._over and abs(err) < p.place_tol_mm and abs(e_aim) < np.radians(p.place_down_deg)
         if placed or self._elapsed() > p.place_timeout:
             self._go("turn", "", r.L[CATH])
@@ -1045,8 +1089,20 @@ class StagedController:
         """Catheter turn rate towards a hook angle error ``e``: full rate far away, slow near (the
         shaft winds up and the hook then whips round, overshooting by up to 50 degrees)."""
         p = self.p
+        far = self._far_turn(e)
+        if far is not None:
+            return far
         cap = p.w_cath_max if abs(e) > np.radians(p.turn_slow_deg) else p.w_turn_near
         return float(np.clip(p.k_rot * e, -cap, cap))
+
+    def _far_turn(self, e: float) -> Optional[float]:
+        """``turn_dir``: the catheter turn rate while the hook is more than ``turn_far_deg`` off its
+        aim (error ``e``): full rate, always the same way round; None nearer than that or with
+        ``turn_dir`` 0 (the caller's proportional rate, the short way)."""
+        p = self.p
+        if p.turn_dir and abs(e) > np.radians(p.turn_far_deg):
+            return float(np.sign(p.turn_dir)) * p.w_cath_max
+        return None
 
     def _turn(self, r: Readout):
         p = self.p
@@ -1183,11 +1239,15 @@ class StagedController:
                 progress = r.depth_bct_wire
             else:
                 progress = an.bct_beyond_mouth + (depth if np.isfinite(depth) else 0.0)
-            hist = self._fork_hist + [progress]
+            pushed = self._wire_pushed or not p.stall_needs_push
+            if not pushed and self._fork_hist and np.isfinite(self._fork_prev):
+                self._fork_skip += progress - self._fork_prev     # moved without the push asked for
+            self._fork_prev = progress
+            hist = self._fork_hist + [progress - self._fork_skip] if pushed else self._fork_hist
             self._fork_hist = hist[-(p.fork_stall_steps + 1):]
             n = p.fork_stall_steps
-            buckle = len(hist) >= 3 and hist[-1] < hist[-3] - p.fork_retreat_mm
-            stall = len(hist) > n and max(hist[-n:]) - hist[-n - 1] < 1.0
+            buckle = pushed and len(hist) >= 3 and hist[-1] < hist[-3] - p.fork_retreat_mm
+            stall = pushed and len(hist) > n and max(hist[-n:]) - hist[-n - 1] < 1.0
             cath_drop = (self._fork_dbc0 - r.depth_bct_cath) > p.fork_cath_drop_mm
             rsa = r.wire_branch == "rsa" and depth > p.rsa_back_mm
             why = ("rsa" if rsa else "buckle" if buckle else "stall" if stall else "cath_drop" if cath_drop
@@ -1249,8 +1309,13 @@ class StagedController:
             why = "eca"
         elif label == "down" and side > p.v7_back_mm:
             why = "down"
-        if self._ica_pushed:                                 # steps spent aiming do not count as a stall
-            self._ica_hist = (self._ica_hist + [s])[-(p.ica_stall_steps + 1):]
+        pushed = self._wire_pushed or not p.stall_needs_push
+        if not pushed and self._ica_hist and np.isfinite(self._ica_prev):
+            self._ica_skip += s - self._ica_prev                  # moved without the push asked for
+        self._ica_prev = s
+        if self._ica_pushed and pushed:
+            # steps spent aiming do not count as a stall (nor, ``stall_needs_push``, a push not made)
+            self._ica_hist = (self._ica_hist + [s - self._ica_skip])[-(p.ica_stall_steps + 1):]
         hist = self._ica_hist
         if not why and ((len(hist) > p.ica_stall_steps and max(hist) - hist[0] < 2.0)
                         or self._wire_blocked >= p.blocked_steps):
@@ -1345,7 +1410,11 @@ class StagedController:
         if moved > p.slip_mm and (near_end or in_carotid):
             self._go("follow", "brake", L)
             return 0.0, 0.0, -p.v_brake, 0.0
-        hist = (self._f_hist + [depth_c])[-(p.follow_stall_steps + 1):]
+        pushed = self._cath_pushed or not p.stall_needs_push
+        if not pushed and self._f_hist and np.isfinite(depth_c) and np.isfinite(self._f_prev):
+            self._f_skip += depth_c - self._f_prev                # moved without the push asked for
+        self._f_prev = depth_c
+        hist = (self._f_hist + [depth_c - self._f_skip])[-(p.follow_stall_steps + 1):] if pushed else self._f_hist
         self._f_hist = hist
         stalled = len(hist) > p.follow_stall_steps and np.isfinite(hist[0]) and np.isfinite(hist[-1]) \
             and max(hist) - hist[0] < 1.0

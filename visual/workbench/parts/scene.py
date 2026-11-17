@@ -426,9 +426,40 @@ class TrackedPointsLayer:
             dot.visible = self._visible and i < self._placed
 
 
+class BenchGridLayer:
+    """A 1 cm grid under the instruments, only on the instrument bench (no vessel to measure against):
+    parallel to the x-y plane the devices bend in at turn 0, 5 cm lines lighter."""
+
+    WIDTH_MM, HEIGHT_MM, BEHIND_MM = 320.0, 220.0, -25.0
+
+    def __init__(self, server, path: str = "/bench_grid") -> None:
+        self._server, self._path = server, path
+        self._handle = None
+
+    def set_scene(self, info: SceneInfo) -> None:
+        from .bench import BENCH_KEY
+
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+        if info.vessel_key != BENCH_KEY:
+            return
+        center = np.array([self.WIDTH_MM / 2 - 20.0, self.HEIGHT_MM / 2 - 70.0, self.BEHIND_MM])
+        self._handle = self._server.scene.add_grid(
+            self._path, width=self.WIDTH_MM * MM, height=self.HEIGHT_MM * MM, plane="xy",
+            cell_size=10 * MM, section_size=50 * MM, cell_color=(90, 90, 90), section_color=(150, 150, 150),
+            position=tuple(center * MM))
+
+
 # ----------------------------------------------------------------- camera --
 def scene_center_mm(info: SceneInfo) -> np.ndarray:
-    """Middle of the training's branches (all centerlines when none are named)."""
+    """Middle of the training's branches (all centerlines when none are named); on the instrument
+    bench a bit above the insertion axis, where the shaped ends bend to."""
+    from .bench import BENCH_KEY
+
+    if info.vessel_key == BENCH_KEY:
+        line = np.concatenate(list(info.centerlines.values()))
+        return (line.min(axis=0) + line.max(axis=0)) / 2 + np.array([0.0, 50.0, 0.0])
     lines = [v for k, v in info.centerlines.items() if info.is_task_branch(k)] or list(info.centerlines.values())
     lines = np.concatenate(lines)
     return (lines.min(axis=0) + lines.max(axis=0)) / 2

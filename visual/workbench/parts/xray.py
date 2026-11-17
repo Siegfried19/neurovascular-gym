@@ -25,7 +25,7 @@ CONTRAST_LOOK = ((35, 35, 35), 0.55)
 LIGHT = ("studio", 0.7, 0.12)      # environment map, intensity normally and in X-ray mode (flat, no shine)
 # per layer: shown in X-ray mode? (None = follow its own checkbox)
 ALWAYS_HIDDEN = ("body", "centerlines", "other_centerlines", "radius_tubes", "trail", "force")
-POLICY_ONLY = ("target", "tracked")
+POLICY_ONLY = ("target", "tracked", "junctions")   # the junction map is in the observation
 
 
 def visible_in_xray(layer: str, contrast: bool, policy_marks: bool) -> Optional[bool]:

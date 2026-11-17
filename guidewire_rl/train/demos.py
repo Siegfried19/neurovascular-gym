@@ -23,6 +23,8 @@ with the same env config as the training, so observations and rewards match):
 | ``terminated`` | (T,) bool | |
 | ``truncated`` | (T,) bool | optional, not needed by the replay |
 | ``labels/<name>`` (or ``label_<name>``) | (T,) float | every label the env defines (optional: 0, with a warning) |
+| ``materials`` | (T, M) float | the reward's raw materials (two_device/reward_formula.py); required when the run recomputes rewards from them (``env.reward_formula``) |
+| ``expert_action`` | (T, act_dim) float | optional, not read: a demonstration step's imitation target is its own action (``replay.SCRIPTED_SOURCES``) |
 """
 
 from __future__ import annotations
@@ -64,8 +66,10 @@ def read_demo(path: Path, label_names) -> Dict[str, Any]:
                 missing.append(name)
                 value = np.zeros(len(action), dtype=np.float32)
             labels[name] = value
+        materials = _first(data, "materials", "reward_materials")
         return {"observations": obs, "actions": action, "rewards": reward,
-                "terminated": terminated, "phase": phase, "labels": labels, "missing": missing}
+                "terminated": terminated, "phase": phase, "labels": labels, "missing": missing,
+                "materials": materials}
 
 
 def load_demos(replay, spec: Optional[Mapping[str, Any]], *,
@@ -93,8 +97,11 @@ def load_demos(replay, spec: Optional[Mapping[str, Any]], *,
         if np.asarray(demo["actions"]).shape[1:] != (replay.action_dim,):
             raise ValueError(f"{path}: actions are {np.asarray(demo['actions']).shape[1:]} but the "
                              f"env takes ({replay.action_dim},)")
+        if replay.reward_fn is not None and demo.get("materials") is None:
+            raise ValueError(f"{path}: this run recomputes rewards from materials but the demonstration "
+                             f"has none; re-record the demos with this config (scripts/record_demos.py)")
         replay.add(obs, demo["actions"], demo["rewards"], demo["terminated"], demo["labels"],
-                   phase=demo["phase"], demo=True)
+                   phase=demo["phase"], demo=True, materials=demo.get("materials"))
         transitions += len(demo["actions"])
         short += int(len(demo["actions"]) < replay.horizon)
         missing_labels.update(demo["missing"])

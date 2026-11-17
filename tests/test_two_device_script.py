@@ -547,6 +547,273 @@ def test_act_reads_a_fake_scene_and_starts_with_the_wire(anatomy):
     assert action[0] == pytest.approx(1.0) and action[2] == 0.0    # wire first, at its limit
 
 
+# ------------------------------------- a procedure a policy without memory can copy (11-14) ----
+def test_the_procedure_switches_default_to_the_procedure_as_it_was():
+    p = S.ScriptParams()
+    assert (p.first_place, p.turn_dir, p.turn_far_deg, p.stall_needs_push, p.push_done_ratio, p.give_up) \
+        == (True, 0, 60.0, False, 0.5, True)
+
+
+def test_first_place_off_turns_the_hook_up_where_the_retraction_left_it_on_the_first_try_only(anatomy):
+    behind = readout(anatomy, L=[230.0, 268.0])                          # d = -38: wire behind the hook
+    ctl = controller(anatomy)                                            # default: place first
+    ctl._go("place", "retract")
+    step(ctl, behind)
+    assert (ctl.stage, ctl.substage) == ("place", "")
+    # off, first try: straight to the turn, with the turn's action (catheter still, hook turned)
+    ctl = controller(anatomy, first_place=False)
+    p = ctl.p
+    ctl._go("place", "retract")
+    _, _, v_c, w_c = step(ctl, behind)
+    assert (ctl.stage, ctl.substage, ctl.tries) == ("turn", "", 0)
+    assert [name for name, _ in ctl.log] == ["approach", "place:retract", "turn"]
+    assert v_c == 0.0 and w_c == pytest.approx(ctl._turn_rate(S.wrap(behind.phi_up - ctl.aim)))
+    for _ in range(p.turn_hold):                                         # hook up and held: pull
+        step(ctl, readout(anatomy, L=[230.0, 268.0], phi_up=ctl.aim + 0.05))
+    assert ctl.stage == "pull"
+    # a pull that finds nothing: the next try places as before (hook down, then the place stage)
+    step(ctl, readout(anatomy, L=[230.0, 268.0 - p.pull_max_mm - 1], vessel_cath="aorta"))
+    assert (ctl.stage, ctl.substage, ctl.tries) == ("place", "", 1) and ("place:lower", ctl.steps) in ctl.log
+    # a retraction on a later try places too
+    ctl = controller(anatomy, first_place=False)
+    ctl.tries = 1
+    ctl._go("place", "retract")
+    step(ctl, behind)
+    assert (ctl.stage, ctl.substage) == ("place", "")
+
+
+def test_far_turn_is_full_rate_one_way_round_beyond_turn_far_deg_and_none_otherwise():
+    w = S.ScriptParams().w_cath_max
+    ctl = S.StagedController(turn_dir=-1)
+    for deg in (61.0, 90.0, 179.0, -61.0, -90.0, -179.0):
+        assert ctl._far_turn(np.radians(deg)) == -w, deg
+    for deg in (0.0, 30.0, -30.0, 59.0, -59.0):
+        assert ctl._far_turn(np.radians(deg)) is None, deg
+    assert S.StagedController(turn_dir=1)._far_turn(np.radians(-90.0)) == w
+    assert S.StagedController(turn_dir=-3)._far_turn(np.radians(90.0)) == -w          # its sign only
+    assert S.StagedController(turn_dir=-1, turn_far_deg=30.0)._far_turn(np.radians(40.0)) == -w
+    ctl = S.StagedController()                                                         # turn_dir 0
+    assert all(ctl._far_turn(np.radians(deg)) is None for deg in (-179.0, -90.0, 90.0, 179.0))
+
+
+def _hook_turn_rates(anatomy, deg, **params):
+    """The catheter turn rate each hook stage sends with the hook ``deg`` degrees off that stage's
+    aim: place (hook down, ``place_aim_deg``), place:lower (``phi_down``), turn and pull (first aim)."""
+    e = np.radians(deg)
+    L = [223.0, 260.0]
+    rates = {}
+    ctl = controller(anatomy, **params)
+    ctl._go("place", "", 260.0)
+    rates["place"] = step(ctl, readout(anatomy, L=L, phi_up=S.wrap(np.radians(ctl.p.place_aim_deg) + e)))[3]
+    assert (ctl.stage, ctl.substage) == ("place", "")
+    ctl = controller(anatomy, **params)
+    ctl._go("place", "lower", 260.0)
+    rates["lower"] = step(ctl, readout(anatomy, L=L, phi_down=e))[3]
+    assert (ctl.stage, ctl.substage) == ("place", "lower")
+    for stage in ("turn", "pull"):
+        ctl = controller(anatomy, **params)
+        ctl._go(stage, "", 260.0)
+        rates[stage] = step(ctl, readout(anatomy, L=L, phi_up=S.wrap(ctl.aim + e), vessel_cath="aorta"))[3]
+        assert ctl.stage == stage
+    return rates
+
+
+def test_turn_dir_turns_the_hook_one_way_round_while_far_off_its_aim_in_place_lower_turn_and_pull(anatomy):
+    p = S.ScriptParams()
+    for turn_dir in (0, -1, 1):
+        for deg in (150.0, 90.0, -90.0, -150.0, 40.0, -40.0):
+            rates = _hook_turn_rates(anatomy, deg, turn_dir=turn_dir)
+            if turn_dir and abs(deg) > p.turn_far_deg:
+                want = turn_dir * p.w_cath_max                   # whatever the side of the aim
+            else:                                                # the old rate: the short way round
+                want = float(np.clip(p.k_rot * np.radians(deg), -p.w_cath_max, p.w_cath_max))
+            assert rates == pytest.approx(dict.fromkeys(rates, want)), (turn_dir, deg, rates)
+
+
+class _Shell:
+    """An env whose shell executed ``last_action`` last step ([[wire push, wire turn], [catheter push,
+    catheter turn]], mm/s and rad/s, as stEVE keeps it); no attribute when ``None``."""
+
+    simulation = None
+
+    def __init__(self, last_action):
+        if last_action is not None:
+            self.last_action = np.asarray(last_action, float)
+
+
+def test_note_shell_tells_whether_the_push_asked_last_step_was_executed(anatomy):
+    asked = [20.0, 0.0, 8.0, 0.0]
+
+    def note(done, last=asked, steps=1, **params):
+        ctl = controller(anatomy, **params)
+        ctl.steps, ctl.last_physical = steps, np.asarray(last, float)
+        ctl._note_shell(_Shell(done))
+        return ctl._wire_pushed, ctl._cath_pushed
+
+    assert note([[20.0, 0.0], [8.0, 0.0]]) == (True, True)
+    assert note([[10.0, 0.0], [4.0, 0.0]]) == (True, True)               # half of the ask is done
+    assert note([[9.9, 0.0], [8.0, 0.0]]) == (False, True)
+    assert note([[20.0, 0.0], [3.9, 0.0]]) == (True, False)
+    assert note([[-5.0, 0.0], [-5.0, 0.0]]) == (False, False)            # pulled instead
+    assert note([[7.9, 0.0], [3.1, 0.0]], push_done_ratio=0.4) == (False, False)
+    assert note([[8.0, 0.0], [3.2, 0.0]], push_done_ratio=0.4) == (True, True)
+    # no push to check: not asked (<= 1 mm/s, a pull), the first step, no record, one device only
+    assert note([[0.0, 0.0], [0.0, 0.0]], last=[1.0, 0.0, 1.0, 0.0]) == (True, True)
+    assert note([[0.0, 0.0], [0.0, 0.0]], last=[-15.0, 0.0, -3.0, 0.0]) == (True, True)
+    assert note([[0.0, 0.0], [0.0, 0.0]], steps=0) == (True, True)
+    assert note(None) == (True, True)
+    assert note([0.0, 0.0]) == (False, True)
+    # a step that was executed sets the flags back
+    ctl = controller(anatomy)
+    ctl.steps, ctl.last_physical = 1, np.asarray(asked)
+    ctl._note_shell(_Shell([[0.0, 0.0], [0.0, 0.0]]))
+    assert not ctl._wire_pushed and not ctl._cath_pushed
+    ctl._note_shell(_Shell([[20.0, 0.0], [8.0, 0.0]]))
+    assert ctl._wire_pushed and ctl._cath_pushed
+    # the blocked-wire count: off, as before (less than a quarter of the ask, in a row); on, never
+    ctl = controller(anatomy)
+    ctl.steps, ctl.last_physical = 1, np.asarray(asked)
+    for done, blocked in ((4.9, 1), (4.9, 2), (5.0, 0), (0.0, 1)):
+        ctl._note_shell(_Shell([[done, 0.0], [8.0, 0.0]]))
+        assert ctl._wire_blocked == blocked and not ctl._wire_pushed, done
+    ctl = controller(anatomy, stall_needs_push=True)
+    ctl.steps, ctl.last_physical = 1, np.asarray(asked)
+    for _ in range(2 * ctl.p.blocked_steps):
+        ctl._note_shell(_Shell([[0.0, 0.0], [8.0, 0.0]]))
+        assert ctl._wire_blocked == 0 and not ctl._wire_pushed
+
+
+def test_act_checks_the_shells_last_action_against_what_it_asked_the_step_before(anatomy):
+    for on in (False, True):
+        intervention = _FakeIntervention(anatomy, L_wire=0.0, L_cath=0.0)
+        intervention.last_action = np.zeros((2, 2))                     # the shell executed nothing
+        ctl = S.StagedController(stall_needs_push=on)
+        ctl.reset(intervention)
+        ctl.act(intervention)                                            # first step: nothing asked before
+        assert ctl._wire_pushed and ctl._cath_pushed and ctl.last_physical[0] == pytest.approx(40.0)
+        ctl.act(intervention)                                            # asked 40 mm/s of wire, got 0
+        assert not ctl._wire_pushed and ctl._cath_pushed                 # (no catheter push asked)
+        assert ctl._wire_blocked == (0 if on else 1)
+        intervention.last_action = np.array([[ctl.last_physical[0], 0.0], [0.0, 0.0]])
+        ctl.act(intervention)
+        assert ctl._wire_pushed and ctl._wire_blocked == 0
+
+
+def _fork(anatomy, progress, wire_pushed, cath_pushed=True, **params):
+    """Fork bursts on steps with the wire tip ``progress`` mm into the trunk, each step's push (the
+    one ``_note_shell`` checked) executed or not; the controller and the wire speeds it sent."""
+    ctl = controller(anatomy, **params)
+    ctl._go("wire", "fork", 230.0)
+    v = []
+    for x, ok in zip(progress, wire_pushed):
+        ctl._wire_pushed, ctl._cath_pushed = ok, cath_pushed
+        v.append(step(ctl, readout(anatomy, L=[247.0, 230.0], vessel_cath="bct", depth_bct_cath=20.0,
+                                   wire_branch="bct", depth_bct_wire=x))[0])
+    return ctl, v
+
+
+def test_stall_needs_push_fork_bursts_count_only_the_pushes_executed(anatomy):
+    p = S.ScriptParams()
+    forks = lambda ctl: [name for name, _ in ctl.log if name.startswith("fork:")]
+    # the tip does not move while the push is not made: on, no stall and nothing in the history ...
+    ctl, v = _fork(anatomy, [30.0] * 10, [False] * 10, stall_needs_push=True)
+    assert v == [p.v_fork] * 10 and ctl.substage == "fork" and ctl._fork_hist == [] and forks(ctl) == []
+    # ... off, a stall as before
+    ctl, v = _fork(anatomy, [30.0] * 3, [False] * 3)
+    assert v[-1] == -p.v_backoff and forks(ctl) == ["fork:stall"] and ctl.steps == 3
+    # on: executed pushes still stall, the ones not made in between are skipped
+    ctl, v = _fork(anatomy, [30.0] * 5, [True, False, True, False, True], stall_needs_push=True)
+    assert v[:4] == [p.v_fork] * 4 and v[4] == -p.v_backoff and forks(ctl) == ["fork:stall"]
+    # the catheter's push does not matter here
+    ctl, v = _fork(anatomy, [30.0] * 3, [True] * 3, cath_pushed=False, stall_needs_push=True)
+    assert v[-1] == -p.v_backoff and forks(ctl) == ["fork:stall"]
+    # a dip while the push was not made: on, no buckle, and what the tip moved over that step is left
+    # out of the history (the last entry is 32 + the 6 mm the executed push gained); off, a buckle
+    dip, made = [30.0, 32.0, 28.0, 34.0], [True, True, False, True]
+    ctl, v = _fork(anatomy, dip, made, stall_needs_push=True)
+    assert v == [p.v_fork] * 4 and ctl._fork_hist == [30.0, 32.0, 38.0] and forks(ctl) == []
+    ctl, v = _fork(anatomy, dip, made)
+    assert v[2] == -p.v_backoff and ("fork:buckle", 3) in ctl.log
+    # the policy pulled 10 mm back over two steps it did not push, then pushed and gained 1 mm: that
+    # retreat is not a buckle of the executed pushes (0.4 + 1 mm gained, no stall either)
+    ctl, v = _fork(anatomy, [30.0, 30.4, 20.0, 20.0, 21.0], [True, True, False, False, True], stall_needs_push=True)
+    assert v == [p.v_fork] * 5 and forks(ctl) == [] and ctl._fork_hist == pytest.approx([30.0, 30.4, 31.4])
+
+
+def test_stall_needs_push_ica_stall_counts_only_the_pushes_executed(anatomy):
+    p, an = S.ScriptParams(), anatomy
+    n = p.ica_stall_steps + 1
+
+    def run(steps, wire_pushed, cath_pushed=True, **params):
+        ctl = controller(anatomy, **params)
+        ctl._go("ica", "", 230.0)
+        v = []
+        for _ in range(steps):                                 # below both aiming windows: plain pushes
+            ctl._wire_pushed, ctl._cath_pushed = wire_pushed, cath_pushed
+            v.append(step(ctl, ica_readout(an, [330.0, 230.0], 40.0))[0])
+        return ctl, v
+
+    ctl, v = run(n, False)                                     # off: a stall as before
+    assert v[:-1] == [p.v_ica] * (n - 1) and v[-1] == -p.v_ica_backoff and ("ica:stall", n) in ctl.log
+    ctl, v = run(3 * n, False, stall_needs_push=True)          # on: pushes not made never stall
+    assert v == [p.v_ica] * (3 * n) and ctl._ica_hist == [] and (ctl.stage, ctl.substage) == ("ica", "")
+    ctl, v = run(n, True, cath_pushed=False, stall_needs_push=True)     # executed pushes still do
+    assert v[-1] == -p.v_ica_backoff and ("ica:stall", n) in ctl.log
+
+
+def test_stall_needs_push_follow_stall_counts_only_the_catheter_pushes_executed(anatomy):
+    p, an = S.ScriptParams(), anatomy
+    anchor = an.split_mm + 31.0
+    n = p.follow_stall_steps + 1
+
+    def run(steps, cath_pushed, wire_pushed=True, **params):
+        ctl = controller(anatomy, **params)
+        ctl._go("follow", "", 230.0)
+        for _ in range(steps):                                 # the catheter tip does not move
+            ctl._cath_pushed, ctl._wire_pushed = cath_pushed, wire_pushed
+            step(ctl, ica_readout(an, [371.0, 240.0], anchor, depth_bct_cath=22.0))
+        return ctl
+
+    ctl = run(n, False)                                        # off: pulses as before
+    assert ("follow:pulse", n) in ctl.log and ctl._f_mode == "pulse"
+    ctl = run(3 * n, False, stall_needs_push=True)             # on: pushes not made never stall
+    assert ctl._f_mode == "steady" and ctl._f_hist == [] and not any(nm == "follow:pulse" for nm, _ in ctl.log)
+    ctl = run(n, True, wire_pushed=False, stall_needs_push=True)        # executed pushes still do
+    assert ("follow:pulse", n) in ctl.log and ctl._f_mode == "pulse"
+
+
+def test_give_up_off_never_ends_the_script(anatomy):
+    reasons = ((dict(rewires=2), "rewires:2"), (dict(tries=6), "tries:6"),
+               (dict(stage="wire", steps=240), "budget:wire"))
+    for state, why in reasons:
+        for give_up in (True, False):
+            ctl = controller(anatomy, give_up=give_up)
+            for key, value in state.items():
+                setattr(ctl, key, value)
+            assert ctl._give_up_reason() == (why if give_up else ""), (state, give_up)
+    # the scenes of the give-up tests above: the script goes on
+    p = S.ScriptParams()
+    ctl = controller(anatomy, give_up=False)
+    lost = dict(L=[260.0, 230.0], vessel_cath="aorta", depth_bct_cath=p.lost_mm - 1.0, wire_branch="bct",
+                depth_bct_wire=36.0)
+    for k in (1, 2, 3):
+        ctl._go("wire", "up", 230.0)
+        assert step(ctl, readout(anatomy, **lost)) != (0.0, 0.0, 0.0, 0.0)
+        assert (ctl.stage, ctl.substage, ctl.rewires, ctl.failed) == ("place", "rewire", k, False)
+    ctl = controller(anatomy, give_up=False, give_up_tries=2)
+    r = readout(anatomy, L=[230.0, 268.0])
+    ctl._next_try(r)
+    ctl._next_try(r)
+    assert step(ctl, r) != (0.0, 0.0, 0.0, 0.0) and not ctl.failed and ctl.failure_reason == ""
+    ctl = controller(anatomy, give_up=False, stage_budgets={"wire": 6}, fork_max_tries=1000)
+    ctl._go("wire", "fork", 230.0)
+    stuck = dict(L=[247.0, 230.0], vessel_cath="bct", wire_branch="bct", depth_bct_cath=20.0, depth_bct_wire=36.0)
+    for _ in range(30):
+        step(ctl, readout(anatomy, **stuck))
+    assert not ctl.failed and ctl.stage == "wire"
+    assert not any(str(name).startswith("failed:") for name, _ in ctl.log)
+
+
 # --------------------------------------------------------------------- a whole episode ----
 @pytest.mark.sofa
 @pytest.mark.upstream
@@ -577,7 +844,11 @@ def test_whole_episode_from_the_insertion_point_to_success():
         firsts = [phases.index(k) for k in range(5)]
         assert firsts == sorted(firsts)
         stages = [name.split(":")[0] for name, _ in ctl.log]
-        order = [stages.index(s) for s in S.STAGES[:-1]]
+        # round two's finish (the catheter 5 mm past the split, no lead condition) can arrive while
+        # the script is still following, so 'trim' may never come; the stages that did come are in order
+        present = [s for s in S.STAGES[:-1] if s in stages]
+        assert present[:8] == list(S.STAGES[:8])
+        order = [stages.index(s) for s in present]
         assert order == sorted(order)
     finally:
         env.close()

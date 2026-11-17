@@ -380,3 +380,168 @@ def test_async_errors_and_dead_workers_do_not_stop_training(tmp_path):
     assert len(dropped) == summary["env_errors"]
     reasons = " ".join(e["reason"] for e in dropped)
     assert "fake simulator failure" in reasons and "died" in reasons
+
+
+# ------------------------------------------- evaluation beside training --
+def test_background_evaluation_gives_the_pausing_evaluations_numbers_for_the_agent_at_that_step(tmp_path):
+    """evaluation.background: the agent is copied at the evaluation's step and its episodes run on their
+    own pool while training goes on. The numbers are those of evaluating that step's checkpoint."""
+    fake = {"max_episode_steps": 5, "delay_at_calls": {c: 0.05 for c in range(2, 400, 3)}}
+    config = tiny_config()
+    config["evaluation"]["background"] = True
+    trainer = parallel_trainer(tmp_path, "run", config, fake=fake, async_envs=True)
+    summary = train_and_close(trainer)
+    assert summary["total_env_steps"] == 60
+    run = tmp_path / "run"
+    evals = read_jsonl(run / "eval.jsonl")
+    assert [e["step"] for e in evals] == [30, 60], "every evaluation is finished before training returns"
+    events = [e for e in read_jsonl(run / "events.jsonl") if e["event"] == "evaluation"]
+    assert [e["evaluated_step"] for e in events] == [30, 60] and all(e["background"] for e in events)
+    assert events[0]["step"] >= 30, "reported when it arrives"
+    assert not list((run / "checkpoints").glob("exam_step_*.pt")), "no pending checkpoint left behind"
+
+    # the same episodes, evaluated the pausing way from the checkpoint written at step 30
+    checkpoint = load_checkpoint(run / "checkpoints" / "step_30.pt")
+    agent = trainer.agent.acting_copy()
+    agent.load_state_dict(checkpoint["agent"], load_optimizers=False)
+    ev = config["evaluation"]
+    seeds = [int(ev["seed"]) + i for i in range(int(ev["episodes"]))]
+    pool = EnvPool(FakeEnv, kwargs={"max_episode_steps": 5}, num_envs=2)
+    try:
+        reference = evaluate_pool(pool, agent, seeds)["summary"]
+    finally:
+        pool.close()
+    for key, value in reference.items():
+        assert evals[0][key] == value, key
+
+
+def test_background_evaluation_touches_neither_trainings_random_numbers_nor_its_agent(tmp_path):
+    """The evaluation's episodes use their own RNG streams and their own copy of the agent."""
+    config = tiny_config()
+    config["evaluation"]["background"] = True
+    trainer = parallel_trainer(tmp_path, "run", config, async_envs=True)
+    try:
+        trainer._exam, trainer._exams, trainer._exam_polled = None, [], 0.0
+        trainer.timing["evaluation beside training"] = 0.0
+        before = {k: v.clone() for k, v in trainer.agent.state_dict()["model"].items()}
+        warm_start = trainer.agent.previous_mean.clone()
+        torch.manual_seed(7)
+        rng = torch.get_rng_state()
+        trainer._queue_evaluation()
+        trainer._settle_evaluations()
+        assert torch.equal(torch.get_rng_state(), rng)
+        assert torch.equal(trainer.agent.previous_mean, warm_start)
+        for key, value in trainer.agent.state_dict()["model"].items():
+            assert torch.equal(value, before[key]), key
+        assert [e["step"] for e in read_jsonl(tmp_path / "run" / "eval.jsonl")] == [0]
+    finally:
+        trainer.env.close()
+
+
+def test_background_evaluation_keeps_the_evaluated_agent_as_best_and_drops_on_an_interrupt(tmp_path):
+    config = tiny_config()
+    config["evaluation"].update(background=True, keep_best=True)
+    trainer = parallel_trainer(tmp_path, "run", config, async_envs=True)
+    train_and_close(trainer)
+    run = tmp_path / "run"
+    best = [e for e in read_jsonl(run / "events.jsonl") if e["event"] == "best_checkpoint"]
+    assert best and load_checkpoint(run / "checkpoints" / "best.pt")["total_env_steps"] == best[-1]["evaluated_step"]
+    assert not list((run / "checkpoints").glob("exam_step_*.pt"))
+
+    # an interrupt while an evaluation is outstanding: dropped, said so, nothing left behind
+    config = tiny_config()
+    config["evaluation"].update(background=True, keep_best=True)
+    trainer = parallel_trainer(tmp_path, "stopped", config, async_envs=True)
+    original = trainer._queue_evaluation
+
+    def queue_and_interrupt():
+        original()
+        raise KeyboardInterrupt
+
+    trainer._queue_evaluation = queue_and_interrupt
+    with pytest.raises(KeyboardInterrupt):
+        train_and_close(trainer)
+    stopped = tmp_path / "stopped"
+    dropped = [e for e in read_jsonl(stopped / "events.jsonl") if e["event"] == "evaluation_dropped"]
+    assert dropped and dropped[0]["evaluated_steps"] == [30]
+    assert not (stopped / "eval.jsonl").exists() or not read_jsonl(stopped / "eval.jsonl")
+    assert not list((stopped / "checkpoints").glob("exam_step_*.pt"))
+
+
+def test_background_evaluation_needs_the_async_trainer(tmp_path):
+    config = tiny_config()
+    config["evaluation"]["background"] = True
+    with pytest.raises(ValueError, match="evaluation.background"):
+        parallel_trainer(tmp_path, "run", config, async_envs=False)
+
+
+def test_evaluation_time_limit_ends_the_unfinished_episodes_as_simulation_errors(tmp_path):
+    """evaluation.max_minutes: episodes still running then are recorded as simulation errors, the
+    evaluation reports as usual; in the pausing evaluation and in the one beside training."""
+    slow = {"max_episode_steps": 5, "delay_at_calls": {c: 1.0 for c in range(3, 400)}}   # crawls from the 3rd call on
+    for background in (False, True):
+        config = tiny_config()
+        config["evaluation"].update(background=background, max_minutes=1.5 / 60.0, interval=30)
+        config["training"]["total_steps"] = 30
+        trainer = parallel_trainer(tmp_path, f"run{background}", config, fake=slow, num_envs=2, async_envs=True)
+        train_and_close(trainer)
+        run = tmp_path / f"run{background}"
+        evals = read_jsonl(run / "eval.jsonl")
+        assert [e["step"] for e in evals] == [30] and evals[0]["episodes"] == 2
+        cut = [e for e in read_jsonl(run / "events.jsonl") if e["event"] == "evaluation_cut"]
+        assert cut and cut[0]["evaluated_step"] == 30 and len(cut[0]["seeds"]) >= 1
+        assert evals[0]["end_reasons"].get("simulation_error", 0) == len(cut[0]["seeds"])
+
+
+def test_at_most_one_background_evaluation_waits(tmp_path):
+    config = tiny_config()
+    config["evaluation"]["background"] = True
+    trainer = parallel_trainer(tmp_path, "run", config, async_envs=True)
+    try:
+        trainer._exam, trainer._exams, trainer._exam_polled = None, [], 0.0
+        trainer.timing["evaluation beside training"] = 0.0
+        trainer._queue_evaluation()
+        trainer._poll_evaluation()                        # the first one starts
+        for step in (10, 20, 30):
+            trainer.step = step
+            trainer._queue_evaluation()                   # 10 waits, 20 replaces it, 30 replaces 20
+        assert trainer._exam["step"] == 0 and [job["step"] for job in trainer._exams] == [30]
+        trainer._settle_evaluations()
+        assert [e["step"] for e in read_jsonl(tmp_path / "run" / "eval.jsonl")] == [0, 30]
+        dropped = [e for e in read_jsonl(tmp_path / "run" / "events.jsonl") if e["event"] == "evaluation_dropped"]
+        assert [e["evaluated_steps"] for e in dropped] == [[10], [20]]
+    finally:
+        trainer.env.close()
+
+
+def test_evaluation_episodes_end_when_stalled_and_training_episodes_do_not(tmp_path):
+    """evaluation.end_when_stalled: only the evaluation episodes are asked to end once the devices stand
+    still (the fake env "stalls" at step 2 when asked); they are reported with the end reason "stalled",
+    not as simulation errors; training episodes on the same simulators run on. Pausing and beside training."""
+    fake = {"max_episode_steps": 6, "stall_step": 2}
+    for background in (False, True):
+        for on in (True, False):
+            config = tiny_config()
+            config["evaluation"].update(background=background, end_when_stalled=on, interval=30, episodes=4)
+            config["training"]["total_steps"] = 30
+            name = f"run{background}{on}"
+            train_and_close(parallel_trainer(tmp_path, name, config, fake=fake, num_envs=2, async_envs=True))
+            evaluation = read_jsonl(tmp_path / name / "eval.jsonl")[0]
+            stalled = evaluation["end_reasons"].get("stalled", 0)
+            assert evaluation["end_reasons"].get("simulation_error", 0) == 0
+            lengths = [e["length"] for e in read_jsonl(tmp_path / name / "episodes.jsonl") if not e["success"]]
+            assert lengths and all(length == 6 for length in lengths)        # training: to the step limit
+            if on:
+                assert stalled >= 1 and stalled + evaluation["end_reasons"].get("success", 0) == 4
+            else:
+                assert stalled == 0
+
+
+def test_evaluate_on_one_env_ends_stalled_episodes_only_when_asked():
+    agent = build_agent(tiny_config(), observation_dim=4, action_dim=2, episode_length=6)
+    env = FakeEnv(max_episode_steps=6, stall_step=2)
+    asked = evaluate(env, agent, [3, 4, 5], end_when_stalled=True)
+    plain = evaluate(env, agent, [3, 4, 5])
+    assert asked["summary"]["end_reasons"].get("stalled", 0) >= 1
+    assert "stalled" not in plain["summary"]["end_reasons"]
+    assert all(e["length"] <= 2 or e["success"] for e in asked["episodes"])

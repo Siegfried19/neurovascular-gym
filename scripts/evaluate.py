@@ -30,7 +30,11 @@ What it does:
 * ``--save-episodes DIR``: one ``.npz`` per episode in the workbench's
   ``EpisodeLog`` format (``visual/workbench/parts/frame.py``); per-frame extras
   carry phase, events, shield, d, nominal/executed action and both tips (mm,
-  vessel frame).
+  vessel frame); with the hand-written procedure in shadow (``--set
+  'env.shadow_expert={type: StagedController}'``) also what it would have done
+  from that step's state (``expert_action``, NaN when it has none; ``expert_stage``,
+  ``expert_substage``, ``expert_off``, ``expert_events``; see
+  ``guidewire_rl/env/two_device/shadow.py``).
 """
 
 from __future__ import annotations
@@ -39,8 +43,9 @@ import argparse
 import json
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+import traceback
 from multiprocessing import get_context
+from multiprocessing.connection import wait as connection_wait
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -59,7 +64,9 @@ from guidewire_rl.train.evaluate import report, run_episode
 WORKBENCH = WORKSPACE_ROOT / "visual" / "workbench"
 CATHETER_ACTIONS = (2, 3)        # catheter push and turn in a two-instrument action
 FRAME_INFO_KEYS = ("phase", "max_phase", "shield_delta", "d", "nominal_action",
-                   "executed_action", "policy_action")
+                   "executed_action", "policy_action",
+                   # the shadow expert (env.shadow_expert, guidewire_rl/env/two_device/shadow.py)
+                   "expert_action", "expert_stage", "expert_substage", "expert_off", "expert_events")
 
 
 # ------------------------------------------------------------------ options --
@@ -218,7 +225,9 @@ def evaluate_seeds(config: Mapping[str, Any], checkpoint_path: str, jobs: Sequen
                 torch.manual_seed(int(seed))
                 started = time.time()
                 record = run_episode(env, agent, seed, cutoff=cutoff, residual=residual,
-                                     action_hook=hook, hooks=recorder)
+                                     action_hook=hook, hooks=recorder,
+                                     eval_mode=not options.get("sample"),
+                                     end_when_stalled=bool((config.get("evaluation") or {}).get("end_when_stalled")))
                 record["wall_s"] = time.time() - started
                 record["order"] = int(order)
                 if recorder is not None:
@@ -233,10 +242,49 @@ def evaluate_seeds(config: Mapping[str, Any], checkpoint_path: str, jobs: Sequen
 def evaluate_parallel(config, checkpoint_path, jobs, options, workers: int) -> List[Dict[str, Any]]:
     chunks = [jobs[k::workers] for k in range(workers) if jobs[k::workers]]
     sub = dict(options, torch_threads=options.get("torch_threads") or 2)
-    with ProcessPoolExecutor(max_workers=len(chunks), mp_context=get_context("spawn")) as pool:
-        futures = [pool.submit(evaluate_seeds, config, checkpoint_path, chunk, sub) for chunk in chunks]
-        records = [r for f in futures for r in f.result()]
+    # One process per chunk that exits as soon as its own episodes are done (a pool's workers stay until the
+    # last one finishes and keep their GPU memory: 2026-11-15 a finished 40-process evaluation still held
+    # 12.6 GB of a 16 GB card and the next one hung at its start without an error).
+    context = get_context("spawn")
+    running = {}
+    for chunk in chunks:
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(target=_evaluate_chunk, args=(sender, config, checkpoint_path, chunk, sub))
+        process.start()
+        sender.close()
+        running[receiver] = process
+    records, failures = [], []
+    while running:
+        for receiver in connection_wait(list(running)):
+            process = running.pop(receiver)
+            try:
+                status, payload = receiver.recv()
+            except EOFError:
+                status, payload = "error", f"worker {process.pid} died without an answer"
+            receiver.close()
+            process.join()
+            (records.extend if status == "ok" else failures.append)(payload)
+    if failures:
+        raise RuntimeError("evaluation worker(s) failed:\n" + "\n".join(failures))
     return sorted(records, key=lambda r: r["order"])
+
+
+def _evaluate_chunk(sender, config, checkpoint_path, chunk, options) -> None:
+    try:
+        sender.send(("ok", evaluate_seeds(config, checkpoint_path, chunk, options)))
+    except BaseException:  # pylint: disable=broad-except
+        sender.send(("error", traceback.format_exc()))
+    finally:
+        sender.close()
+
+
+def default_device(config: Mapping[str, Any], workers: int) -> Optional[str]:
+    """``--device`` not given: several processes acting with the policy network alone (``planning.mpc:
+    false``) run it on the CPU (a small network; N processes on one card each hold a few hundred MB of
+    it for nothing). With the planner, or one process, the config's device as before."""
+    if workers > 1 and not bool((config.get("planning") or {}).get("mpc", True)):
+        return "cpu"
+    return None
 
 
 def table(summary: Mapping[str, Any]) -> str:
@@ -294,6 +342,9 @@ def main() -> None:
                         help="train | eval | keep (default eval; only for targets with a split)")
     parser.add_argument("--freeze-catheter", action="store_true",
                         help="send 0 for the catheter's push and turn (actions 2 and 3)")
+    parser.add_argument("--sample", action="store_true",
+                        help="act as in training (the policy's sampled action / the planner's noise) "
+                             "instead of the mean action; to tell a policy that stalls without noise")
     parser.add_argument("--save-episodes", metavar="DIR", help="one workbench .npz per episode")
     parser.add_argument("--workers", type=int, default=1, help="processes, one env each")
     parser.add_argument("--device", help="override training.device")
@@ -305,14 +356,15 @@ def main() -> None:
     first = args.seed if args.seed is not None else int(config["evaluation"]["seed"])
     count = args.episodes or int(config["evaluation"]["episodes"])
     jobs = [(k, first + k) for k in range(count)]
-    options = {"device": args.device, "freeze_catheter": args.freeze_catheter,
+    options = {"device": args.device or default_device(config, args.workers), "freeze_catheter": args.freeze_catheter, "sample": args.sample,
                "save_dir": args.save_episodes,
                "description": f"{Path(args.checkpoint).name} · {Path(args.config).name}"}
     split = next((o.split("=", 1)[1] for o in reversed(overrides)
                   if o.startswith("env.scene.target.split=")), None)
     print(f"evaluating {count} episodes (seeds {first}-{first + count - 1})"
           + (f", target split {split}" if split else "")
-          + (", catheter frozen" if args.freeze_catheter else "") + f", {args.workers} process(es)",
+          + (", catheter frozen" if args.freeze_catheter else "") + f", {args.workers} process(es)"
+          + (f", device {options['device']}" if options["device"] else ""),
           flush=True)
     if args.workers > 1:
         records = evaluate_parallel(config, args.checkpoint, jobs, options, args.workers)

@@ -1,4 +1,4 @@
-"""The route and the ruler of the two-device task (todo_list/two_devices_training.md, sections 1-2).
+"""The route and the ruler of the two-device task (todo_list/archive/two_devices_training.md, sections 1-2).
 
 Pure geometry on the vessel tree's centerlines and listed junctions; no stEVE pathfinder. Every
 length is in mm, every point in the vessel frame (stEVE's "vessel coordinate system"; the
@@ -323,9 +323,76 @@ class Route:
             mouth = g.point(name, float(g.mouth_arc[b]))
             ahead = self.point_at(self.offsets[name] + DIRECTION_MM)
             self.junctions.append((name, mouth, unit(ahead - mouth)))
+        self.all_junctions: List[Tuple[str, np.ndarray, np.ndarray, float]] = self._all_junctions()
         self._target: Optional[Location] = None
         self._target_point: Optional[np.ndarray] = None
         self._F: Optional[Location] = None
+        self._s_F: Optional[float] = None
+
+    def _all_junctions(self) -> List[Tuple[str, np.ndarray, np.ndarray, float]]:
+        """Every place on the route where a vessel leaves it, in route order: (name of the
+        vessel that leaves, mouth point, direction to go, route arc length). The route's own turns
+        (``junctions``) are among them, named after the vessel the route turns into; a side vessel
+        the route passes is named after itself. Several vessels leaving at the same point are one
+        junction (the trunk's end: the right carotid and the right subclavian). Junctions behind the
+        insertion point (the aortic root) and a plain continuation of a vessel are left out. The
+        direction is the route's: into the next route vessel at a turn, the route's own tangent 10 mm
+        on at a side vessel (the roadmap's 'carry on')."""
+        g = self.graph
+        # where the route leaves each of its vessels (the next one's junction; the last runs to its end)
+        leave_arc = {name: g.length[g.index[name]] for name in self.chain}
+        for here, following in zip(self.chain[:-1], self.chain[1:]):
+            leave_arc[here] = float(g.attach_arc[g.index[following]])
+        groups: Dict[Tuple[str, float], List[int]] = {}
+        for child, parent in g.parent.items():
+            if parent is None or g.names[parent] not in self.offsets:
+                continue
+            arc = float(g.attach_arc[child])
+            if arc > leave_arc[g.names[parent]] + 1e-6:
+                continue                                   # off the route (e.g. the ascending aorta)
+            key = next((k for k in groups if k[0] == g.names[parent] and abs(k[1] - arc) < 1e-6),
+                       (g.names[parent], arc))
+            groups.setdefault(key, []).append(child)
+        out = []
+        for (parent_name, arc), children in groups.items():
+            parent = g.index[parent_name]
+            s = self.offsets[parent_name] + (arc if parent_name == self.chain[0] else g.effective(parent, arc))
+            if s <= self.s_insertion + 1e-6 or s >= self.length - 1e-6:
+                continue
+            turn = next((c for c in children if g.names[c] in self.chain), None)
+            if turn is not None and len(children) == 1 and arc >= g.length[parent] - 1e-6 \
+                    and self._continues(parent, turn):
+                continue                                   # the same vessel carrying on
+            if turn is not None:
+                name = g.names[turn]
+                mouth = g.point(name, float(g.mouth_arc[turn]))
+                direction = unit(self.point_at(self.offsets[name] + DIRECTION_MM) - mouth)
+            else:
+                side = min(children, key=lambda c: g.names[c])
+                name = g.names[side]
+                mouth = g.point(name, float(g.mouth_arc[side]))
+                direction = unit(self.point_at(s + DIRECTION_MM) - self.point_at(s))
+            out.append((name, mouth, direction, float(s)))
+        out.sort(key=lambda j: j[3])
+        return out
+
+    def s_of_fork(self, branch: str) -> float:
+        """Route arc length where side vessel ``branch`` leaves a route vessel (its junction)."""
+        g = self.graph
+        b = g.index[branch]
+        parent = g.parent[b]
+        if parent is None or g.names[parent] not in self.offsets:
+            raise KeyError(f"{branch!r} does not leave a vessel of the route {self.chain}")
+        arc = float(g.attach_arc[b])
+        name = g.names[parent]
+        return self.offsets[name] + (arc if name == self.chain[0] else g.effective(parent, arc))
+
+    def depth_past(self, s_mark: float, loc: Location) -> float:
+        """Signed mm along the route past route arc length ``s_mark`` for a point on the route;
+        a point off the route (in a side vessel) counts negative: its path back to the mark."""
+        if loc.branch in self.offsets:
+            return self.s(None, loc) - float(s_mark)
+        return -self.graph.path(loc, self.location_at(float(s_mark)))
 
     def _continues(self, parent: int, child: int) -> bool:
         """``child`` carries on ``parent`` (joined at its end, the only branch there)."""
@@ -418,13 +485,17 @@ class Route:
         return self.graph.path(la, lb)
 
     # --------------------------------------------------------------- target and F ----
-    def set_target(self, point: np.ndarray, catheter_goal_depth_mm: float = 15.0) -> None:
-        """The episode's target (vessel frame) and F, the catheter's goal: ``catheter_goal_depth``
-        into the right carotid (the success condition)."""
+    def set_target(self, point: np.ndarray, catheter_goal_depth_mm: float = 15.0,
+                   catheter_goal_s: Optional[float] = None) -> None:
+        """The episode's target (vessel frame) and F, the catheter's goal, a point on the route:
+        ``catheter_goal_s`` as route arc length, else ``catheter_goal_depth_mm`` into the right
+        carotid (past the trunk's end)."""
         self._target_point = np.asarray(point, dtype=np.float64).reshape(3)
         self._target = self.locate(self._target_point)
-        self._F_depth = float(catheter_goal_depth_mm)
-        self._F = self.location_at(self.s_rcca + self._F_depth)
+        self._s_F = float(catheter_goal_s) if catheter_goal_s is not None \
+            else self.s_rcca + float(catheter_goal_depth_mm)
+        self._F_depth = self._s_F - self.s_rcca
+        self._F = self.location_at(self._s_F)
 
     @property
     def target(self) -> np.ndarray:
@@ -433,8 +504,22 @@ class Route:
         return self._target_point
 
     @property
+    def s_target(self) -> float:
+        """Route arc length of the target (a target off the route: its side vessel's junction plus
+        the way into it, as ``s``)."""
+        if self._target is None:
+            raise RuntimeError("Route.set_target was not called")
+        return self.s(None, self._target)
+
+    @property
+    def s_F(self) -> float:
+        if self._s_F is None:
+            raise RuntimeError("Route.set_target was not called")
+        return self._s_F
+
+    @property
     def F(self) -> np.ndarray:
-        return self.point_at(self.s_rcca + self._F_depth)
+        return self.point_at(self.s_F)
 
     def path_to_target(self, p, loc: Optional[Location] = None) -> float:
         if self._target is None:
@@ -446,7 +531,7 @@ class Route:
         if self._F is None:
             raise RuntimeError("Route.set_target was not called")
         loc = loc or self.locate(p)
-        if self.graph.depth(loc, self.chain[2]) >= self._F_depth:
+        if loc.branch in self.offsets and self.s(None, loc) >= self._s_F:
             return 0.0
         return self.graph.path(loc, self._F)
 
@@ -456,9 +541,15 @@ class Route:
         return unit(self.point_at(s + 2.0) - self.point_at(s - 2.0))
 
     # ------------------------------------------------------------------------ 2D ----
-    def task_points(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Centerline points (with radii) of the task region, for the 2D box."""
+    def task_points(self, region: str = "task") -> Tuple[np.ndarray, np.ndarray]:
+        """Centerline points (with radii) for the 2D box: ``region`` 'task' = the arch, its
+        branches and the carotid to 100 mm (``TASK_BOUNDS_*``); 'tree' = every centerline of the
+        vessel tree (the whole phantom: the same box for any target, user decision 2026-11-08)."""
         g = self.graph
+        if region == "tree":
+            return np.concatenate(g.coords), np.concatenate(g.radii)
+        if region != "task":
+            raise ValueError(f"region must be 'task' or 'tree', got {region!r}")
         pts, rad = [], []
         for name in TASK_BOUNDS_BRANCHES:
             if name in g.index:
@@ -482,10 +573,10 @@ def to_tracking2d(points: np.ndarray, fluoroscopy) -> np.ndarray:
         points, fluoroscopy.image_rot_zx, fluoroscopy.image_center, None)).astype(np.float64)
 
 
-def task_box_2d(route: Route, fluoroscopy) -> Tuple[np.ndarray, np.ndarray]:
+def task_box_2d(route: Route, fluoroscopy, region: str = "task") -> Tuple[np.ndarray, np.ndarray]:
     """(low, high) of the task region in image coordinates: every task centerline point widened by
     its radius (a sphere projects to a disc of the same radius) and a margin."""
-    points, radii = route.task_points()
+    points, radii = route.task_points(region)
     projected = to_tracking2d(points, fluoroscopy)
     low = np.min(projected - radii[:, None], axis=0) - TASK_BOUNDS_MARGIN_MM
     high = np.max(projected + radii[:, None], axis=0) + TASK_BOUNDS_MARGIN_MM

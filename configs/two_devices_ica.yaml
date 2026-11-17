@@ -1,25 +1,48 @@
-# two_devices_real_mass.yaml with the task's end point moved into the right internal carotid (the
-# whole route of Robertshaw 2026, from our insertion point in the descending aorta; user decision
-# 2026-11-06). Changed here, all with existing parameters:
-#   - target: 20-40 mm past the carotid's ICA/ECA split (the split is 90.9 mm past the carotid's
-#     opening on rebuilt_cut, so 111-131 mm along the carotid chain; even candidates for training,
-#     --set env.scene.target.split=eval for the odd ones). The window starts at +20 so that the
-#     catheter can be >= 5 mm into the ICA with the wire 15 mm ahead (the user's "10-40" could not);
-#   - referee: success needs the catheter >= 5 mm past the split (96 mm along the chain, the
-#     'cath_in_rcca' threshold; F for the CatheterToF reward moves there too); the wire past the
-#     carotid's first fork (64 mm) is no longer an event;
-#   - MaxSteps 800: the scripted controller needs 510-530 steps for a clean run (two_device/script.py);
-#   - C-arm per target (image_rot_zx: per_target; the direction agreed 2026-11-03, switched on for round
-#     two 2026-11-09): each episode uses the angle chosen for the whole route to the target's branch,
-#     the right carotid and its continuation into the ICA: LAO 15, cranial 7.5 = stEVE [52.0, -12.2]
-#     (c_arm/README.md), instead of round one's fixed [61.0, -21.0];
-#   - discount pinned at 0.99375 (training.discount_min = discount_max; user decision 2026-11-09): the
-#     TD-MPC2 heuristic 1 - 5 / MaxSteps (clipped to [0.95, 0.995]) gave 0.975 for G13's 200 steps,
-#     0.9917 for round one's 600 and 0.99375 for these 800; the step limit is set for the script's
-#     margin, gamma for how far the finish reward reaches back, so the two are no longer tied;
-#   - NOT changed yet (round two): the 2D box of the observations (route.py, TASK_BOUNDS_RCCA_REST_MM
-#     = 100 mm) stops short of these targets, so TaskTarget2D clips them; training on this config
-#     needs that limit raised.
+# Round two of the two-device task (todo_list/two_devices_round2_changes.md: every line below points at
+# the decision it comes from; the numbers are the user's to review, section I). Guidewire + the lab's
+# hooked catheter from the descending aorta, over the arch, up the right carotid into the internal
+# carotid; the whole route of Robertshaw 2026 from our insertion point (user decision 2026-11-06).
+#
+# On two_devices_real_mass.yaml (real masses, 4 ms physics, the wall monitors, the force blow-up gate).
+# What this config is (round two), part by part:
+#   - target (B5): the wire's target drawn 35-45 mm past the ICA/ECA split (v8 leaves the carotid
+#     chain 90.9 mm past the carotid's opening), even candidates for training (--set
+#     env.scene.target.split=eval for the odd ones); the wire tip then sits past the ICA's first sharp
+#     bend (22-30 mm past the split) with the catheter at F on the wire's stiff part (soft tip 30 mm);
+#   - referee (B1-B8): first tier = wire in the target ball + catheter >= 60 mm into the right carotid,
+#     not past the split, 8 steps (+1 once, the episode goes on); second tier = wire in the ball +
+#     catheter >= 5 mm past the split, 8 steps (+1, the end); no lead condition; events: wrong vessel
+#     (in 8 mm, counts again only after coming all the way out) and dislodged (catheter out of the
+#     trunk after sitting 8 mm in), 0.1 off for a wrong vessel only; hard failure = a tip 6 mm outside
+#     every centerline tube (the wall-breach truncation normally fires first);
+#   - reward (A1-A8): one formula of the step's raw materials (two_device/reward_formula.py), computed
+#     by the env after the labels and recomputed by the replay from the stored materials when a batch
+#     is sampled; progress 0.01/mm along the route to the wire's target (the nearer tip, the whole way:
+#     progress_ruler nearest, the recommended of 甲/乙), catheter 0.01/mm to F (not gated), force
+#     penalty per device 0.1 * min(1, ((F - knee)+ / width)^2) with knee 2 N / width 3 N for the
+#     catheter and 0.5 N / 1 N for the wire, 0.002 a step, +1/+1 for the tiers, -1 out of the vessel;
+#     the stEVE reward slot is ZeroReward; no phase, hook-shaping, window or shell term; smoothness
+#     (user 2026-11-13): 0.005 x the mean over the four dimensions of the squared change of the executed
+#     action (velocity / limit, read off the observation's last_actions): full-speed back-and-forth costs
+#     0.02 a step, steady motion nothing;
+#   - observation (C1-C6), 120 numbers: two tips with tracking noise (0.5-1 mm), two shapes, the wire's
+#     target and the catheter's F, the route's six junctions all at once (positions offset +-3 mm on a
+#     2 mm grid, directions to go on in; no "passed" judgement), insertion lengths, d, rotations, the
+#     last three executed actions, the first-tier flag, two earlier frames; all 2D numbers normalized
+#     over the whole vessel tree's box (TaskBox2D, region tree);
+#   - action (D1-D3): TwoDeviceLimits: the robot-mode layer (pass-through for now), the velocity limits
+#     (wire 40 mm/s, pi/s; catheter 25 mm/s, pi/2 per s) and the insertion limits; nothing else;
+#   - episode (E1-E9): WireFirst opening (wire alone to 40 mm), MaxSteps 800 counted from the insertion
+#     point (a scripted prefix's steps included), gamma pinned at 0.99375, no phase cutoff; simulation
+#     errors / wall breaches / force blow-ups truncate and are dropped (trainer);
+#   - training (F, G): start curriculum (prefix supply, ten distance grids, baseline 0.3 from the
+#     insertion point), demonstrations never evicted with a 25 % quota (the same demonstrations as
+#     two_devices_ica_demostart.yaml, runs/demos_round2c; user 2026-11-13: "示范都用最新的，保底份额都一样";
+#     the batch of 2026-11-10, runs/demos_round2, is gone), the policy's own successful episodes kept as
+#     self-demonstrations (500),
+#     four auxiliary heads (huber, weight 1; clearances in cm), evaluation every 25k steps, 50 episodes.
+# NOT in here yet: the demonstration quota's and the hint coefficients' ramps (the schedule's state
+# machine, section G) are run by hand between training stages for now.
 extends: two_devices_real_mass.yaml
 
 run:
@@ -29,13 +52,132 @@ env:
   scene:
     fluoroscopy: {image_rot_zx: per_target}      # the target branch's route angle (rcca: [52.0, -12.2])
     target: {type: RouteWindowTarget, threshold: 5.0, split: train, branches: null,
-             depth_min_mm: 111.0, depth_max_mm: 131.0}
+             past_fork: v8, depth_min_mm: 35.0, depth_max_mm: 45.0, jitter_mm: 0.0, sampling: grid}
+
   monitors:
-    - {name: phase_detector, type: PhaseDetector, catheter_goal_depth_mm: 96.0,
-       thresholds: {cath_in_rcca: 96.0, fork: 1000.0, fork_out: 999.0}}
+    - {name: phase_detector, type: PhaseDetector, split_branch: v8, catheter_goal_past_split_mm: 5.0,
+       platform_hold_steps: 8,
+       thresholds: {tier1_cath_depth: 60.0, tier2_cath_past_split: 5.0, wrong_in: 8.0, wrong_out: 0.0,
+                    seated: 8.0, unseated: 0.0, target_mm: 5.0}}
     - {name: wall_distance, type: WallDistance}
-  truncation: [PhaseCutoff, {type: MaxSteps, max_steps: 800}, SimError, WallBreach, TipForceBlowup]
+    - {name: task_box, type: TaskBox2D, region: tree}
+
+  observation:                 # 120 values, in this order
+    - {name: wire_tip, type: InstrumentTip2D, instrument: 0, wrappers: [TipNoise2D, Normalize2DTask]}
+    - {name: wire_shape, type: InstrumentShape2D, instrument: 0, n_points: 4, spacing_mm: 4.0}
+    - {name: cath_tip, type: InstrumentTip2D, instrument: 1, wrappers: [TipNoise2D, Normalize2DTask]}
+    - {name: cath_shape, type: InstrumentShape2D, instrument: 1, n_points: 6, spacing_mm: 10.0}
+    - {name: target, type: TaskTarget2D, wrappers: [Normalize2DTask]}
+    - {name: cath_target, type: TaskTarget2D, point: F, wrappers: [Normalize2DTask]}
+    - {name: junctions, type: JunctionMap2D, mode: all, n_junctions: 6, offset_mm: 3.0, grid_mm: 2.0}
+    - {name: inserted, type: InsertionLengthsNormalized}
+    - {name: d, type: InsertionDiff}
+    - {name: rotation, type: Rotations}
+    - {name: last_actions, type: LastAction, wrappers: [Normalize, {type: Memory, n_steps: 3, reset_mode: 1}]}
+    - {name: tier1, type: TierFlag}
+    - {name: history, type: FrameHistory, terms: [wire_tip, wire_shape, cath_tip, cath_shape], frames: 2}
+  observation_clip: 1.0
+
+  reward: [ZeroReward]         # the reward is the formula below, computed after the labels
+  reward_formula: {type: TwoDeviceFormula, progress_ruler: nearest,
+                   progress: 0.01, follow: 0.01,
+                   force_cap: 0.1, cath_knee_N: 2.0, cath_width_N: 3.0, wire_knee_N: 0.5, wire_width_N: 1.0,
+                   step_penalty: 0.002, wrong_vessel: 0.1, tier1: 1.0, tier2: 1.0, failure: 1.0,
+                   arch_ruler: false, lead_soft_min_mm: null,
+                   action_change: 0.005}       # smoothness (user 2026-11-13): 0.005 x mean (e_t - e_{t-1})^2
+  terminal: [PlatformReached, HardFailure]
+  # Stalled: the episode ends once neither device's inserted length changed by min_mm over window_steps
+  # steps (two_device/truncation.py). Off as written: evaluation.end_when_stalled turns it on for the
+  # evaluation episodes; always: true would turn it on for the training episodes too.
+  truncation: [{type: MaxSteps, max_steps: 800}, SimError, WallBreach, TipForceBlowup,
+               {type: Stalled, window_steps: 200, min_mm: 3.0, always: false}]
+  info: [PhaseInfo, ShieldInfo, WallInfo, ForceBlowupInfo, StallInfo]
+  # the parent's shell parameters are dropped (null) with its rules
+  action: {type: TwoDeviceLimits, speed_limits: [[40.0, 3.1415926], [25.0, 1.5707963]],
+           bare_push_d_mm: null, bare_push_max: null, force_limits_N: null, force_limit_hook_factor: null,
+           protector_mm: null, branch_push_max: null, residual_phases: null}
+  # the hand-written procedure in shadow (guidewire_rl/env/two_device/shadow.py; on in
+  # two_devices_ica_dagger.yaml): false = off; written here (null would drop the key) so that
+  # --set 'env.shadow_expert={type: StagedController}' can switch it on, e.g. in scripts/evaluate.py
+  shadow_expert: false
+  # per-episode scene parameters (guidewire_rl/env/randomization.py; on in two_devices_ica_randomized.yaml):
+  # false = off, written here so that --set can switch it on
+  randomize: false
+
+aux_heads:                     # the four prediction heads (F5): what the latent must carry
+  - {name: wire_force, label: distal_force, loss: huber, weight: 1.0, gradient: shared, output: softplus}
+  - {name: cath_force, label: catheter_tip_force, loss: huber, weight: 1.0, gradient: shared, output: softplus}
+  - {name: wire_clearance, label: wire_tip_clearance, loss: huber, weight: 1.0, gradient: shared,
+     output: identity, target_scale: 10.0}
+  - {name: cath_clearance, label: catheter_tip_clearance, loss: huber, weight: 1.0, gradient: shared,
+     output: identity, target_scale: 10.0}
+
+replay:
+  stratify_by: null            # no phase strata in round two (the phases are statistics only)
 
 training:
   discount_min: 0.99375        # gamma pinned: 1 - 5/800 (what the heuristic gave); see the header
   discount_max: 0.99375
+  cutoff_mixture: null         # the truncation curriculum is replaced by the start curriculum
+  # the update compiled into a few fused GPU kernels (guidewire_rl/model/fast_update.py; 2026-11-15):
+  # about 4x fewer ms per update, statistically the same update, needs gcc on the machine. Off: as before.
+  compile_update: false
+  # grid: distance (the progress ratio, 10 % a grid) or landmarks (milestones generated from the route,
+  # nine on this route = grids 1-10, so bins stays 10; user decisions 2026-11-10 14:56, 22:24)
+  start_curriculum: {supply: prefix, grid: distance, bins: 10, baseline_fraction: 0.3,
+                     frontier_threshold: 0.5, min_episodes: 20, window_episodes: 100,
+                     update_every: 25000, floor_weight: 0.05, prefix_max_steps: 600}
+  demos: {dir: runs/demos_round2c, fraction: 0.25}         # = two_devices_ica_demostart.yaml (user 2026-11-13)
+  self_demos: {enabled: true, capacity: 500}
+  # behaviour cloning (2026-11-13, user: "既然我们用手写的推法能够实现，那么你就要用这个policy实现"; work log):
+  # the policy prior also imitates the hand-written procedure's actions on the scripted transitions in
+  # the replay (prefix steps and demonstrations); fades with the schedule's demonstration quota
+  bc_coef: 1.0
+  # the prior also imitates the replayed actions of its own successful episodes kept as
+  # self-demonstrations (self_demos above); not faded by the schedule. 0 = off. What it is for: once
+  # the teacher is gone nothing else holds the prior's actions in place (training record,
+  # round2_dagger_v5: the critic told "push" from "stay" too weakly at the arch and the prior slid to
+  # "stay" within 20k steps)
+  self_bc_coef: 0.0
+  # smooth actions asked of the policy prior directly (user 2026-11-13 afternoon; work log): 1.0 x the
+  # mean squared gap between the prior's mean actions on consecutive steps, on every transition of the
+  # batch. The reward's action_change (0.005) stays: it reaches the prior only through the critic and did
+  # not hold (-8.3 an episode at 150k steps), the planner still reads it. The weight is a first guess.
+  policy_smooth_coef: 1.0
+  # the schedule (guidewire_rl/train/schedule.py; section G, user 2026-11-10 16:19): curriculum ->
+  # demonstration quota ramped to 0 -> wrap-up until 5 evaluations without a new best, the guard on
+  # every ramp. User 2026-11-13 afternoon:
+  #   - ladder off: the arch ruler is not used ("还是不要换了"); it switches on a tip's history this
+  #     episode (reached the hook point or not), which the observation does not carry;
+  #   - force penalty light first ("先轻后重"): its cap x 0.25 from the first batch, climbing to 1 over
+  #     150 000 steps once the last two evaluations succeed half of the time (force_pass_rate = pass_rate),
+  #     under the guard; only what the agent learns from is scaled, evaluations report the full penalty.
+  schedule: {demo_ramp_steps: 150000, pass_rate: 0.5, guard_drop: 0.15, guard_floor: 0.30, hold_evals: 3,
+             stop_patience: 5, hint_ramp: false, hint_ramp_steps: 200000, ladder: false,
+             stuck_rate: 0.10, next_rate: 0.50, stuck_evals: 3, stuck_steps: 200000, level_steps: 200000,
+             force_start: 0.25, force_ramp_steps: 150000}
+
+evaluation:
+  interval: 25000
+  episodes: 50
+  keep_best: true              # checkpoints/best.pt at every new best second-tier success rate
+  # true: the evaluation runs beside training on its own simulators instead of pausing it; the result
+  # (and what the schedule does with it) arrives some ten thousand steps later (parallel_trainer.py)
+  background: false
+  # minutes after which an evaluation is ended: the episodes still running count as simulation errors
+  # (0: no limit). A few episodes whose simulator crawls held one evaluation for 68 min (2026-11-15).
+  max_minutes: 0
+  # true: an evaluation episode ends once the devices stand still (env.truncation Stalled above), counted
+  # as not successful with the end reason "stalled". With the window of 200 steps (user 2026-11-16)
+  # under 1 % of the successes are ended (episodes that stand still that long and then succeed), with the
+  # first choice of 100 steps it was 4 %, most of them in the hard conditions (docs/design.md, section 8).
+  # For screening measurements and the periodic evaluations; the 100-episode pass exam runs without it.
+  end_when_stalled: false
+
+logging:                       # docs/wandb_metrics.md: the jsonl files stay the record, wandb is the dashboard
+  # online (user decision 2026-11-10): the curves stream to wandb.ai while training; wandb keeps a local
+  # copy under runs/<run>/wandb too, so a dropped connection or a reboot loses nothing (sync it afterwards).
+  # select core (user 2026-11-11): only the core view's curves go up (the rest stays in the jsonl files);
+  # "dashboard" sends the full list of docs/wandb_metrics.md, "all" every number
+  wandb: {enabled: true, project: neurovascular-gym, mode: online, tags: [round2, two_devices_ica],
+          select: core}

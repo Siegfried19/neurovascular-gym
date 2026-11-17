@@ -46,7 +46,7 @@ def test_shaft_first_then_a_mesh_head():
 @pytest.mark.upstream
 def test_head_follows_the_trace_point_by_point():
     """The head stEVE lays out (the polyline BeamAdapter reads as the rest shape) against every
-    traced point of the head: mean <= 0.3 mm, max <= 2.5 mm (todo_list/two_devices_measurements.md)."""
+    traced point of the head: mean <= 0.3 mm, max <= 2.5 mm (todo_list/archive/two_devices_measurements.md)."""
     from eve.intervention.instrument.util.meshing import create_shape_point_cloud
     from scipy.spatial import cKDTree
     from guidewire_rl.env.instruments import Simmons2, simmons2

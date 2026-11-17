@@ -1,4 +1,4 @@
-"""The safety shell between the policy and the two devices (todo_list/two_devices_training.md,
+"""The safety shell between the policy and the two devices (todo_list/archive/two_devices_training.md,
 section 2), and the optional script suggestion.
 
 ``TwoDeviceGuarded`` is the env's action map (``env.action``): the policy gives four numbers in
@@ -45,7 +45,7 @@ from __future__ import annotations
 import importlib
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import gymnasium as gym
 import numpy as np
@@ -190,7 +190,8 @@ class TwoDeviceGuarded:
                 new = command.copy()
                 new[cath_v] = cap
                 apply("hard_rule", new)
-                self.phase_detector.report("bare_advance")
+                if "bare_advance" in getattr(self.phase_detector, "pending_events", {"bare_advance": 0}):
+                    self.phase_detector.report("bare_advance")
 
         # 4. force limit from last step's tip forces
         new = command.copy()
@@ -334,6 +335,104 @@ class TwoDeviceGuarded:
         return new
 
 
+class Passthrough:
+    """The robot-mode layer with nothing in it: the command goes through unchanged. The slot where
+    the robot's own rules (one device at a time, clamp before turning) go when they are known
+    (user decision 2026-11-08: build the frame first, fill the layer before training on the robot)."""
+
+    def apply(self, normalized: np.ndarray, state) -> np.ndarray:  # pylint: disable=unused-argument
+        return normalized
+
+
+def build_mode_map(spec: Optional[Mapping[str, Any]], intervention, phase_detector):
+    if not spec:
+        return Passthrough()
+    spec = dict(spec)
+    module_name, class_name = spec.pop("type").rsplit(".", 1)
+    cls = getattr(importlib.import_module(module_name), class_name)
+    params = inspect.signature(cls.__init__).parameters
+    for dep, obj in (("intervention", intervention), ("phase_detector", phase_detector)):
+        if dep in params and dep not in spec:
+            spec[dep] = obj
+    return cls(**spec)
+
+
+@register("action")
+class TwoDeviceLimits:
+    """Round two's action map: the shell with no behaviour rule in it (user decision 2026-11-08).
+    The policy's four numbers in [-1, 1] -> the robot-mode layer (``mode_map``, pass-through by
+    default) -> the velocity limits (mm/s, rad/s) -> stEVE's own insertion limits (a push or pull
+    that would end at or below 0 mm or at or past the device's length is dropped, applied here so
+    the record says so). No force limit, no bare-push rule, no same-length guard: the true forces go
+    to the reward and the prediction heads, never to the shell. ``last`` is a ``ShieldRecord`` as
+    ``TwoDeviceGuarded``'s (stages ``mode``, ``speed``, ``device_limit``; nothing is penalized), so
+    ``ShieldInfo`` reports it the same way."""
+
+    STAGES = ("mode", "speed", "device_limit")
+
+    def __init__(self, intervention, phase_detector: Optional[PhaseDetector] = None,
+                 speed_limits: Sequence[Sequence[float]] = ((40.0, np.pi), (25.0, np.pi / 2)),
+                 control_hz: Optional[float] = None, mode_map: Optional[Mapping[str, Any]] = None,
+                 nominal_advisor=None) -> None:
+        self.intervention = intervention
+        self.phase_detector = phase_detector
+        self.speed_limits = np.asarray(speed_limits, dtype=np.float64).reshape(-1, 2)
+        self.control_hz = control_hz
+        self.mode_map = build_mode_map(mode_map, intervention, phase_detector)
+        self.nominal_advisor = nominal_advisor
+        self.penalized_stages: Tuple[str, ...] = ()
+        self.last = ShieldRecord()
+
+    def space(self, raw_low: np.ndarray, raw_high: np.ndarray) -> gym.spaces.Box:
+        shape = np.asarray(raw_low).reshape(-1).shape
+        return gym.spaces.Box(low=-np.ones(shape, dtype=np.float32),
+                              high=np.ones(shape, dtype=np.float32), dtype=np.float32)
+
+    def to_raw(self, action: np.ndarray, raw_low: np.ndarray, raw_high: np.ndarray) -> np.ndarray:
+        normalized = np.asarray(action, dtype=np.float64).reshape(-1)
+        if normalized.shape != np.asarray(raw_low).reshape(-1).shape:
+            raise ValueError(f"Expected action shape {np.asarray(raw_low).shape}, got {normalized.shape}.")
+        if not np.all(np.isfinite(normalized)):
+            raise ValueError("Action contains NaN or infinity")
+        low = np.asarray(raw_low, dtype=np.float64).reshape(-1)
+        high = np.asarray(raw_high, dtype=np.float64).reshape(-1)
+        policy = np.clip(normalized, -1.0, 1.0)
+        scale = np.where(np.abs(high) > 0, np.abs(high), 1.0)
+        stages: List[str] = []
+        state = self.phase_detector.state if self.phase_detector is not None else None
+        shaped = np.clip(np.asarray(self.mode_map.apply(policy.copy(), state), dtype=np.float64), -1.0, 1.0)
+        if np.any(np.abs(shaped - policy) > 1e-6):
+            stages.append("mode")
+        command = low + 0.5 * (shaped + 1.0) * (high - low)
+        limits = np.tile(self.speed_limits, (len(command) // 2 // len(self.speed_limits) + 1, 1))
+        limits = limits[: len(command) // 2].reshape(-1)
+        clipped = np.clip(command, -limits, limits)
+        if np.any(np.abs(clipped - command) > 1e-6 * scale):
+            stages.append("speed")
+        command = clipped
+        T = self._step_seconds()
+        maximum = getattr(self.intervention, "instrument_lengths_maximum", None)
+        inserted = getattr(self.intervention, "instrument_lengths_inserted", None)
+        if inserted is not None:
+            limited = command.copy()
+            for device in range(len(command) // 2):
+                end = float(inserted[device]) + limited[2 * device] * T
+                if end <= 0.0 or (maximum is not None and end >= float(maximum[device])):
+                    limited[2 * device] = 0.0
+            if np.any(np.abs(limited - command) > 1e-6 * scale):
+                stages.append("device_limit")
+            command = limited
+        self.last = ShieldRecord(policy=policy.astype(np.float32), nominal=None,
+                                 commanded=(command / scale).astype(np.float32), penalized=0.0,
+                                 stages=stages)
+        return command.astype(np.float32)
+
+    def _step_seconds(self) -> float:
+        hz = self.control_hz or getattr(getattr(self.intervention, "fluoroscopy", None),
+                                         "image_frequency", 7.5)
+        return 1.0 / float(hz)
+
+
 @register("monitor")
 class NominalAdvisor:
     """The script's suggestion for the next step (normalized, 4 numbers), or None.
@@ -414,7 +513,8 @@ class ShieldInfo(Info):
             "nominal_available": nominal is not None,
             "shield_penalized": float(record.penalized),
             "shield_stages": list(record.stages),
-            "shield_causes": {stage: int(stage in record.stages) for stage in STAGES},
+            "shield_causes": {stage: int(stage in record.stages)
+                              for stage in getattr(self.action_map, "STAGES", STAGES)},
         }
 
     def reset(self, episode_nr: int = 0) -> None:

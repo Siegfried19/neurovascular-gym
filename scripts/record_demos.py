@@ -15,6 +15,22 @@ A step on which the simulation went wrong (``simulation_error``: NaN; ``wall_bre
 centerline outside the vessel mesh) is not recorded and ends the episode, as the trainers drop it;
 the episode also ends once the script gives up (``StagedController.failed``: it would only send
 zeros from there on).
+
+``--starts <dir>`` also makes the start library of the "demonstrations as starting points" training
+(``training.start_curriculum`` ``supply: demos``, ``guidewire_rl/train/start_library.py``): along
+every episode a simulation state is saved each time it first reaches a new 10 % grid of the task's
+progress (``EpisodeSnapshots``, as the training episodes do), and the states of the episodes that
+reached success are kept as ``<dir>/grid_KK/demo_<seed>_s<step>.npz``. The states of a seed recorded
+before are replaced. ``--starts-from-failed`` (user 2026-11-13: "也放进开局池") keeps the states of the
+episodes that did not reach success too (the script gave up or ran out of steps; a state is saved on the
+way forward, when the episode first enters a grid, never on the step that went wrong). The recording
+itself is the same with or without either:
+
+    # the demonstrations and the library both configs use (2026-11-13; with the states of the three
+    # episodes the script gave up on, user 2026-11-13)
+    conda run --no-capture-output -n guidewire_rl python scripts/record_demos.py \\
+        --config configs/two_devices_ica_demostart.yaml --seeds 1000-1019 --workers 20 --episode-timeout 1800 \\
+        --out runs/demos_round2c --starts runs/demos_round2c/starts --starts-from-failed
 """
 
 from __future__ import annotations
@@ -29,13 +45,14 @@ from typing import Any, Dict, List, Sequence
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "two_devices_round1.yaml"
+DEFAULT_CONFIG = ROOT / "configs" / "two_devices_ica.yaml"
 LABELS = ("distal_force", "catheter_tip_force", "wire_tip_clearance", "catheter_tip_clearance",
           "substep_motion", "wall_penetration")      # the last two NaN for a config without the wall monitors
-EVENTS = ("wrong_vessel", "dislodged", "bare_advance", "wire_lead_arch", "wire_past_fork")
-SHIELD_CAUSES = ("speed", "residual", "hard_rule", "force", "device_limit", "protector_cross",
-                 "protector_clamp")
+EVENTS = ("wrong_vessel", "dislodged", "tier1")     # the referee's events (two_device/phases.py EVENT_NAMES)
+SHIELD_CAUSES = ("mode", "speed", "residual", "hard_rule", "force", "device_limit", "protector_cross",
+                 "protector_clamp")                  # the union of both action maps' stage names
 PHASE_NAMES = ("arch", "hook", "select", "wire_out", "follow")
+START_BINS = 10                                      # --starts: the grids of the start curriculum (bins: 10)
 
 
 def parse_seeds(text: str) -> List[int]:
@@ -85,17 +102,28 @@ def failure_mode(success: bool, terminated: bool, truncated: bool, info: Dict[st
     return f"out of steps in {ctl_stage}"
 
 
-def run_episode(env, seed: int, max_steps: int, out_dir: Path, params: Dict[str, Any]) -> Dict[str, Any]:
+def run_episode(env, seed: int, max_steps: int, out_dir: Path, params: Dict[str, Any],
+                starts_dir: Path | None = None, starts_from_failed: bool = False) -> Dict[str, Any]:
     from guidewire_rl.env.two_device.script import STAGES, ScriptParams, StagedController
 
     ctl = StagedController(ScriptParams(**params))
     obs, info = env.reset(seed=seed)
     ctl.reset(env)
+    saver = staging = None
+    if starts_dir is not None:                      # one state per new progress grid, kept if this one succeeds
+                                                    # (or always, with starts_from_failed)
+        import shutil
+
+        from guidewire_rl.env.two_device.snapshot import EpisodeSnapshots
+        staging = Path(starts_dir) / "_staging" / f"seed_{seed}"
+        shutil.rmtree(staging, ignore_errors=True)
+        saver = EpisodeSnapshots(bins=START_BINS)
+        saver.begin(str(staging), f"demo_{seed}")
     obs_list = [np.asarray(obs, np.float32)]
     phase_list = [int(info.get("phase", 0))]
     actions, executed, rewards, terminated, truncated = [], [], [], [], []
     labels = {k: [] for k in LABELS}
-    events, causes, stages, success_flags = [], [], [], []
+    events, causes, stages, success_flags, materials = [], [], [], [], []
     t0 = time.time()
     te = tr = False
     for _ in range(max_steps):
@@ -104,6 +132,8 @@ def run_episode(env, seed: int, max_steps: int, out_dir: Path, params: Dict[str,
         obs, reward, te, tr, info = env.step(action)
         if info.get("simulation_error") or info.get("wall_breached"):   # the physics is wrong on this step
             break                                                      # (not recorded, as the trainers drop it)
+        if saver is not None:
+            saver.after_step(env, info)
         obs_list.append(np.asarray(obs, np.float32))
         phase_list.append(int(info.get("phase", phase_list[-1])))
         actions.append(np.asarray(action, np.float32))
@@ -121,10 +151,16 @@ def run_episode(env, seed: int, max_steps: int, out_dir: Path, params: Dict[str,
         causes.append([int(sc.get(k, 0)) for k in SHIELD_CAUSES])
         stages.append(STAGES.index(stage_now) if stage_now in STAGES else -1)
         success_flags.append(bool(info.get("is_success", False)))
+        if info.get("reward_materials") is not None:
+            materials.append(np.asarray(info["reward_materials"], np.float32))
         if te or tr or getattr(ctl, "failed", False):
             break
     steps = len(actions)
     success = bool(success_flags[-1]) if success_flags else False
+    starts_kept = 0
+    if staging is not None:
+        from guidewire_rl.train.start_library import collect_episode_states
+        starts_kept = collect_episode_states(staging, starts_dir, keep=success or starts_from_failed)
     record = dict(
         obs=np.stack(obs_list).astype(np.float32),
         action=np.stack(actions).astype(np.float32),
@@ -133,6 +169,9 @@ def run_episode(env, seed: int, max_steps: int, out_dir: Path, params: Dict[str,
         terminated=np.asarray(terminated, bool),
         truncated=np.asarray(truncated, bool),
         executed_action=np.stack(executed).astype(np.float32),
+        # each step's imitation target (DAgger-style labels, guidewire_rl/env/two_device/shadow.py): the
+        # script is in control here, so it is the action itself
+        expert_action=np.stack(actions).astype(np.float32),
         events=np.asarray(events, np.int16),
         event_names=np.asarray(EVENTS),
         shield_causes=np.asarray(causes, np.int8),
@@ -147,6 +186,9 @@ def run_episode(env, seed: int, max_steps: int, out_dir: Path, params: Dict[str,
     )
     for k in LABELS:
         record[f"labels/{k}"] = np.asarray(labels[k], np.float32)
+    if materials and len(materials) == steps:      # round two: the reward's raw materials per step
+        record["materials"] = np.stack(materials).astype(np.float32)
+        record["tier1"] = np.asarray(bool(info.get("tier1", False)))
     path = out_dir / f"episode_{seed}.npz"
     np.savez_compressed(path, **record)
     phases = np.asarray(phase_list)
@@ -160,7 +202,7 @@ def run_episode(env, seed: int, max_steps: int, out_dir: Path, params: Dict[str,
                 shield_steps={k: int(np.asarray(causes)[:, i].sum()) for i, k in enumerate(SHIELD_CAUSES)}
                 if causes else {},
                 return_=float(np.sum(rewards)), wall_s=round(time.time() - t0, 1),
-                target_depth_mm=float(record["target_depth_mm"]), file=str(path))
+                target_depth_mm=float(record["target_depth_mm"]), file=str(path), starts=starts_kept)
 
 
 def apply_experiment(cfg: Dict[str, Any], dt: float | None, mesh: str | None) -> None:
@@ -177,7 +219,7 @@ def apply_experiment(cfg: Dict[str, Any], dt: float | None, mesh: str | None) ->
 
 
 def worker(args) -> List[Dict[str, Any]]:
-    config_path, overrides, seeds, max_steps, out_dir, params, dt, mesh = args
+    config_path, overrides, seeds, max_steps, out_dir, params, dt, mesh, starts_dir, starts_from_failed = args
     from guidewire_rl.config import load_config
     from guidewire_rl.env import build_env
 
@@ -188,7 +230,8 @@ def worker(args) -> List[Dict[str, Any]]:
     try:
         for seed in seeds:
             try:
-                row = run_episode(env, seed, max_steps, Path(out_dir), params)
+                row = run_episode(env, seed, max_steps, Path(out_dir), params,
+                                  None if starts_dir is None else Path(starts_dir), bool(starts_from_failed))
             except Exception as exc:          # noqa: BLE001 - one bad episode must not stop the rest
                 row = dict(seed=seed, success=False, steps=0, failure=f"error: {exc!r}")
             print(f"seed {seed}: {'success' if row['success'] else 'fail'} in {row['steps']} steps "
@@ -243,8 +286,11 @@ def write_readme(out_dir: Path, rows: List[Dict[str, Any]], config: str, overrid
         "`labels/catheter_tip_clearance`, `labels/substep_motion`, `labels/wall_penetration` | (T,) float32 | "
         "`info['labels']` (NaN where the config has no such label) |",
         "| `executed_action` | (T, 4) float32 | what the safety shell executed (`info['executed_action']`) |",
+        "| `expert_action` | (T, 4) float32 | each step's imitation target (= `action`: the script is in control) |",
         "| `shield_causes` | (T, 7) int8 | shell stage that changed the command (names: `shield_cause_names`) |",
-        "| `events` | (T, 5) int16 | referee events that step (names: `event_names`) |",
+        "| `events` | (T, 3) int16 | referee events that step (names: `event_names`) |",
+        "| `materials` | (T, 12) float32 | the reward's raw materials (`two_device/reward_formula.py`; "
+        "configs with `reward_formula`) |",
         "| `stage` | (T,) int8 | the script's stage when it chose the action (names: `stage_names`) |",
         "| `is_success` | (T,) bool | `info['is_success']` |",
         "| `success`, `seed`, `target_depth_mm`, `stage_log` | scalars | outcome, seed, target depth in "
@@ -289,6 +335,10 @@ def run_children(a, seeds: List[int], n: int, timeout_per_episode: float) -> Non
         base += ["--dt", str(a.dt)]
     if a.mesh:
         base += ["--mesh", a.mesh]
+    if a.starts:
+        base += ["--starts", a.starts]
+    if a.starts_from_failed:
+        base += ["--starts-from-failed"]
 
     def missing(chunk):
         return [s for s in chunk if not (out_dir / "rows" / f"seed_{s}.json").exists()]
@@ -335,19 +385,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="ScriptParams override (Python literal)")
     ap.add_argument("--dt", type=float, default=None, help="physics step in s (labels' substep counts follow)")
     ap.add_argument("--mesh", default=None, help="another wall mesh for the phantom (BiroPhantomArch mesh=)")
+    ap.add_argument("--starts", default=None, metavar="DIR", help="also make the start library there: the states "
+                    "saved along the successful episodes, one per new 10 %% progress grid (supply: demos)")
+    ap.add_argument("--starts-from-failed", action="store_true", help="with --starts: keep the states of the "
+                    "episodes that did not reach success too (default: only the successful ones)")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    if a.starts_from_failed and not a.starts:
+        ap.error("--starts-from-failed needs --starts")
     seeds = parse_seeds(a.seeds)
     out_dir = Path(a.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     import ast
     params = {k: ast.literal_eval(v) for k, v in (item.split("=", 1) for item in a.param)}
     if a.child:                                   # one worker's share, rows written per episode
-        worker((a.config, list(a.set), seeds, a.max_steps, str(out_dir), params, a.dt, a.mesh))
+        worker((a.config, list(a.set), seeds, a.max_steps, str(out_dir), params, a.dt, a.mesh, a.starts,
+                a.starts_from_failed))
         return 0
     rows_dir = out_dir / "rows"
     for s in seeds:                               # a fresh recording of these seeds
         (rows_dir / f"seed_{s}.json").unlink(missing_ok=True)
+        if a.starts:                              # ... and of their saved states
+            for old in Path(a.starts).glob(f"grid_*/demo_{s}_s*.npz"):
+                old.unlink()
     t0 = time.time()
     run_children(a, seeds, max(1, min(a.workers, len(seeds))), a.episode_timeout)
     rows = []
@@ -364,6 +424,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     summary = dict(config=a.config, overrides=a.set, dt=a.dt, mesh=a.mesh, params=params, seeds=seeds,
                    success=int(sum(bool(r.get("success")) for r in rows)), episodes=len(rows),
                    wall_s=round(time.time() - t0, 1), rows=rows)
+    if a.starts:
+        starts = Path(a.starts)
+        (starts / "_staging").rmdir() if (starts / "_staging").is_dir() and not any((starts / "_staging").iterdir()) else None
+        summary["starts_dir"] = str(starts)
+        summary["starts_from_failed"] = bool(a.starts_from_failed)
+        summary["starts_per_grid"] = {f"{k}": len(list((starts / f"grid_{k:02d}").glob("*.npz")))
+                                      for k in range(1, START_BINS + 1)}
+        print(f"start library {starts}: {summary['starts_per_grid']}", flush=True)
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     write_readme(out_dir, rows, a.config, a.set, obs_dim)
     print(f"{summary['success']}/{summary['episodes']} reached success; {out_dir}/summary.json", flush=True)

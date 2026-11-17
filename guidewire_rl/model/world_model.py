@@ -274,6 +274,7 @@ class WorldModel(nn.Module):
         entropy = -log_prob
         entropy_scale = scaled_log_prob / (log_prob + 1e-8)
         return action, {
+            "mean_pre": mean,                       # before tanh (the policy-mean bound, agent.py)
             "mean": squashed_mean,
             "log_std": log_std,
             "entropy": entropy,

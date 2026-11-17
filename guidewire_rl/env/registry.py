@@ -58,32 +58,41 @@ _BUILTIN_MODULES: Dict[str, Dict[str, str]] = {
     "vessel_tree": {"AorticArchRandom": "simulator_modifications.seeds",
                     "BiroPhantomArch": "guidewire_rl.env.vessels.biro_phantom"},
     "instrument": {"Simmons2": "guidewire_rl.env.instruments.simmons2",
-                   "HookCatheter": "guidewire_rl.env.instruments.hook"},
+                   "HookCatheter": "guidewire_rl.env.instruments.hook",
+                   "GlidewireStiff": "guidewire_rl.env.instruments.glidewire",
+                   "CordisSidewinder2": "guidewire_rl.env.instruments.cordis_sidewinder2",
+                   "AccuVuOmniFlush": "guidewire_rl.env.instruments.accuvu_omni_flush"},
 }
 
 # The two-device task (guidewire_rl/env/two_device/), one line per part.
 _TWO_DEVICE = "guidewire_rl.env.two_device."
 _BUILTIN_MODULES["monitor"] = {"PhaseDetector": _TWO_DEVICE + "phases",
                                "NominalAdvisor": _TWO_DEVICE + "actions",
-                               "WallDistance": _TWO_DEVICE + "wall"}
+                               "WallDistance": _TWO_DEVICE + "wall",
+                               "TaskBox2D": _TWO_DEVICE + "observations"}
 _BUILTIN_MODULES["action"]["TwoDeviceGuarded"] = _TWO_DEVICE + "actions"
+_BUILTIN_MODULES["action"]["TwoDeviceLimits"] = _TWO_DEVICE + "actions"
 _BUILTIN_MODULES["target"]["RouteWindowTarget"] = _TWO_DEVICE + "targets"
 _BUILTIN_MODULES["observation"].update({name: _TWO_DEVICE + "observations" for name in (
     "InstrumentTip2D", "InstrumentShape2D", "TaskTarget2D", "JunctionMap2D", "PhaseOneHot",
-    "InsertionDiff", "InsertionLengthsNormalized", "ScriptSuggestion", "FrameHistory")})
+    "InsertionDiff", "InsertionLengthsNormalized", "ScriptSuggestion", "FrameHistory", "TierFlag")})
 _BUILTIN_MODULES["observation_wrapper"].update({name: _TWO_DEVICE + "observations" for name in (
     "TipNoise2D", "Normalize2DTask")})
 _BUILTIN_MODULES["reward"] = {name: _TWO_DEVICE + "rewards" for name in (
     "LeadingTipProgress", "CatheterToF", "HookPrepPotential", "PhasePotential", "WindowPenalty",
-    "EventPenalty", "ShieldPenalty", "StepPenalty", "OutcomeReward")}
+    "EventPenalty", "ShieldPenalty", "StepPenalty", "OutcomeReward", "ZeroReward")}
+_BUILTIN_MODULES["reward"]["TwoDeviceFormula"] = _TWO_DEVICE + "reward_formula"
 _BUILTIN_MODULES["terminal"] = {"PlatformReached": _TWO_DEVICE + "terminal",
                                 "HardFailure": _TWO_DEVICE + "terminal"}
 _BUILTIN_MODULES["truncation"] = {"PhaseCutoff": _TWO_DEVICE + "truncation",
                                   "TipForceBlowup": _TWO_DEVICE + "truncation",
+                                  "Stalled": _TWO_DEVICE + "truncation",
                                   "WallBreach": _TWO_DEVICE + "wall"}
 _BUILTIN_MODULES["start"] = {"WireFirst": _TWO_DEVICE + "start", "FromSnapshot": _TWO_DEVICE + "snapshot"}
 _BUILTIN_MODULES["info"] = {"PhaseInfo": _TWO_DEVICE + "phases", "ShieldInfo": _TWO_DEVICE + "actions",
-                            "WallInfo": _TWO_DEVICE + "wall", "ForceBlowupInfo": _TWO_DEVICE + "truncation"}
+                            "WallInfo": _TWO_DEVICE + "wall", "ForceBlowupInfo": _TWO_DEVICE + "truncation",
+                            "ScenarioInfo": "guidewire_rl.env.randomization",
+                            "StallInfo": _TWO_DEVICE + "truncation"}
 _BUILTIN_MODULES["label"].update({name: _TWO_DEVICE + "labels" for name in (
     "InstrumentTipForce", "CatheterTipForce", "TipClearance", "SubstepMotion")})
 _BUILTIN_MODULES["label"]["WallPenetration"] = _TWO_DEVICE + "wall"

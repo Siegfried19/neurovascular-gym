@@ -80,6 +80,16 @@ def read(config: Mapping[str, Any], params: Sequence[Param] = PARAMS) -> Dict[st
     return out
 
 
+def is_number(p: Param, stored: Any) -> bool:
+    """Whether the stored value is the parameter's numbers (a config can also write a word, e.g.
+    ``image_rot_zx: per_target``: the C-arm angle chosen per target; shown as it is, not editable)."""
+    try:
+        [float(v) for v in (stored if p.vector else [stored])]
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def shown(p: Param, stored: Any) -> Any:
     if p.vector:
         return tuple(float(v) * p.scale for v in stored)
@@ -97,6 +107,10 @@ def changed(base: Mapping[str, Any], values: Mapping[str, Any], params: Sequence
     out = []
     for p in params:
         a, b = base[p.key], values[p.key]
+        if not (is_number(p, a) and is_number(p, b)):
+            if a != b:
+                out.append(p.key)
+            continue
         a, b = (list(a), list(b)) if p.vector else ([a], [b])
         if any(abs(float(x) - float(y)) > 1e-9 * max(1.0, abs(float(x))) for x, y in zip(a, b)):
             out.append(p.key)

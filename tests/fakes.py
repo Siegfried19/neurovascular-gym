@@ -14,7 +14,7 @@ class FakeEnv:
     label_names = ["distal_force"]
 
     def __init__(self, max_episode_steps: int = 15, error_at_calls=(), crash_at_calls=(),
-                 hang_at_calls=(), delay_at_calls=None) -> None:
+                 hang_at_calls=(), delay_at_calls=None, stall_step=None) -> None:
         self.max_episode_steps = max_episode_steps
         self.observation_space = gym.spaces.Box(-1, 1, (4,), dtype=np.float32)
         self.action_space = gym.spaces.Box(-1, 1, (2,), dtype=np.float32)
@@ -23,6 +23,12 @@ class FakeEnv:
         self.hang_at_calls = set(hang_at_calls)
         self.delay_at_calls = dict(delay_at_calls or {})   # call number -> seconds
         self.calls = 0
+        self.stall_step = stall_step          # with end_when_stalled() asked for: the episode ends there
+        self._stall_requested = self._stall_rule = False
+
+    def end_when_stalled(self) -> bool:       # as GuidewireEnv: for the next episode only
+        self._stall_requested = True
+        return True
 
     def _obs(self) -> np.ndarray:
         return np.concatenate([self.pos, self.goal]).astype(np.float32)
@@ -32,6 +38,7 @@ class FakeEnv:
         self.pos = rng.uniform(-0.5, 0.5, 2)
         self.goal = rng.uniform(-0.5, 0.5, 2)
         self.t = 0
+        self._stall_rule, self._stall_requested = self._stall_requested, False
         return self._obs(), {"is_success": False, "simulation_error": False}
 
     def step(self, action):
@@ -54,6 +61,8 @@ class FakeEnv:
         reward = float(before - distance) + float(terminated)
         info = {"is_success": terminated, "simulation_error": False,
                 "labels": {"distal_force": float(np.abs(action).sum())}}
+        if self._stall_rule and self.stall_step is not None and self.t >= self.stall_step and not terminated:
+            truncated, info["stalled"] = True, True
         return self._obs(), reward, terminated, truncated, info
 
     def close(self) -> None:

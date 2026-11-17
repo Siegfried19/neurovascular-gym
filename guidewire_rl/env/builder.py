@@ -26,6 +26,8 @@ Shared parts (added for the two-device task; a config without them builds as bef
   fluoroscopy is built at the table's all-5 angle, the per-target part (``c_arm``) after the
   target, and ``eve.Env`` gets the intervention wrapped so that part runs right after every
   intervention reset (target drawn), before everything else resets.
+* ``shadow_expert:`` (``{type: StagedController, ...}``; absent / null / false = off): the
+  hand-written procedure run alongside the policy for imitation targets (two_device/shadow.py).
 """
 
 from __future__ import annotations
@@ -157,6 +159,14 @@ class _InterventionWithCArm:
             raise AttributeError(name) from None
         return getattr(intervention, name)
 
+    def __setattr__(self, name: str, value) -> None:
+        # writes go to the intervention too (e.g. GuidewireEnv's requested_snapshot, which the start reads
+        # from the intervention it holds); before 2026-11-12 they stayed on the wrapper and were lost
+        if name in ("intervention", "c_arm"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.__dict__["intervention"], name, value)
+
 
 def _build_monitors(specs: Optional[Sequence[Mapping[str, Any]]], deps: Dict[str, Any]) -> Dict[str, Any]:
     monitors: Dict[str, Any] = {}
@@ -175,6 +185,10 @@ def build_env(config: Mapping[str, Any], *, render: bool = False) -> GuidewireEn
     deps = _build_scene(config["scene"])
     if config.get("pathfinder"):
         deps["pathfinder"] = registry.instantiate("pathfinder", config["pathfinder"], deps)
+    if config.get("randomize"):               # per-episode scene parameters (randomization.py); false = off
+        from .randomization import EpisodeRandomizer
+        deps["randomizer"] = EpisodeRandomizer(deps["simulation"], intervention=deps["intervention"],
+                                               **dict(config["randomize"]))
     monitors = _build_monitors(config.get("monitors"), deps)
     labels = [registry.instantiate("label", spec, deps) for spec in config.get("labels", [])]
     deps["labels"] = labels
@@ -188,6 +202,9 @@ def build_env(config: Mapping[str, Any], *, render: bool = False) -> GuidewireEn
         terms[term["name"]] = _build_observation_term(term, deps)
     observation = eve.observation.ObsDict(terms)
     reward = _combine("reward", config["reward"], deps)
+    reward_formula = None
+    if config.get("reward_formula"):
+        reward_formula = registry.instantiate("reward", config["reward_formula"], deps)
     terminal = _combine("terminal", config["terminal"], deps)
     truncation = _combine("truncation", config["truncation"], deps)
     info = _combine("info", config["info"], deps) if config.get("info") else None
@@ -206,13 +223,21 @@ def build_env(config: Mapping[str, Any], *, render: bool = False) -> GuidewireEn
     intervention = deps["intervention"]
     if "c_arm" in deps:
         intervention = _InterventionWithCArm(intervention, deps["c_arm"])
+    if "randomizer" in deps:                  # outermost: the draw comes before the scene is built
+        from .randomization import InterventionWithRandomizer
+        intervention = InterventionWithRandomizer(intervention, deps["randomizer"])
     eve_env = eve.Env(
         intervention=intervention, observation=observation, reward=reward,
         terminal=terminal, truncation=truncation, info=info, start=start,
         pathfinder=pathfinder, visualisation=visualisation)
+    shadow_expert = None
+    if config.get("shadow_expert"):
+        from .two_device.shadow import ShadowExpert
+        shadow_expert = ShadowExpert.from_config(config["shadow_expert"])
     return GuidewireEnv(
         eve_env=eve_env, simulation=deps["simulation"], observation_terms=names,
         labels=labels, action_map=action_map,
         observation_clip=config.get("observation_clip"),
         max_episode_steps=max_steps_of(config["truncation"]),
-        render_mode="human" if render else None, monitors=monitors)
+        render_mode="human" if render else None, monitors=monitors, reward_formula=reward_formula,
+        shadow_expert=shadow_expert, randomizer=deps.get("randomizer"))
